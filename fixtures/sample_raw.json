@@ -1,0 +1,385 @@
+{
+  "urn": "urn:li:fsd_profile:ACoAAFakeJamieLinSynthetic001",
+  "profile": {
+    "status": 200,
+    "body": {
+      "data": {
+        "*elements": [
+          "urn:li:fsd_profile:ACoAAFakeJamieLinSynthetic001"
+        ],
+        "$type": "com.linkedin.restli.common.CollectionResponse"
+      },
+      "included": [
+        {
+          "entityUrn": "urn:li:fsd_profile:ACoAAFakeJamieLinSynthetic001",
+          "objectUrn": "urn:li:member:100000001",
+          "publicIdentifier": "jamie-lin-dev",
+          "firstName": "Jamie",
+          "lastName": "Lin",
+          "headline": "Senior Backend Engineer | Distributed Systems | Open Source Maintainer",
+          "summary": "I build backend systems that stay boring under load: queues that don't fall over, caches that stay consistent, services that degrade gracefully instead of paging someone at 3am. Most of my time is spent on distributed systems problems - consensus, replication, the usual suspects.\n\nOutside of work I maintain a couple of small open source libraries and occasionally write about what breaks in production and why.",
+          "location": {
+            "countryCode": "CA",
+            "$type": "com.linkedin.voyager.dash.identity.profile.ProfileLocation"
+          },
+          "geoLocation": {
+            "geoUrn": "urn:li:fsd_geo:900000001",
+            "$type": "com.linkedin.voyager.dash.identity.profile.ProfileGeoLocation"
+          },
+          "industryUrn": "urn:li:fsd_industry:4",
+          "websites": [
+            {
+              "category": "PERSONAL",
+              "url": "jamielin.dev",
+              "$type": "com.linkedin.voyager.dash.identity.profile.Website"
+            }
+          ],
+          "premium": false,
+          "showVerificationBadge": false,
+          "profilePicture": {
+            "displayImage": {
+              "vectorImage": {
+                "rootUrl": "https://media.licdn.com/dms/image/v2/SYNTHETIC0001/profile-displayphoto-shrink_",
+                "artifacts": [
+                  {
+                    "width": 100,
+                    "height": 100,
+                    "fileIdentifyingUrlPathSegment": "100_100/synthetic-a1?e=1&v=beta&t=synth1"
+                  },
+                  {
+                    "width": 400,
+                    "height": 400,
+                    "fileIdentifyingUrlPathSegment": "400_400/synthetic-a2?e=1&v=beta&t=synth2"
+                  }
+                ],
+                "$type": "com.linkedin.common.VectorImage"
+              }
+            },
+            "$type": "com.linkedin.voyager.dash.identity.profile.PhotoFilterPicture"
+          },
+          "backgroundPicture": {
+            "displayImage": {
+              "vectorImage": {
+                "rootUrl": "https://media.licdn.com/dms/image/v2/SYNTHETIC0002/profile-displaybackgroundimage-shrink_",
+                "artifacts": [
+                  {
+                    "width": 800,
+                    "height": 200,
+                    "fileIdentifyingUrlPathSegment": "200_800/synthetic-b1?e=1&v=beta&t=synth3"
+                  },
+                  {
+                    "width": 1399,
+                    "height": 350,
+                    "fileIdentifyingUrlPathSegment": "350_1400/synthetic-b2?e=1&v=beta&t=synth4"
+                  }
+                ],
+                "$type": "com.linkedin.common.VectorImage"
+              }
+            },
+            "$type": "com.linkedin.voyager.dash.identity.profile.PhotoFilterPicture"
+          },
+          "$type": "com.linkedin.voyager.dash.identity.profile.Profile"
+        }
+      ]
+    }
+  },
+  "profilePositionGroups": {
+    "status": 200,
+    "body": {
+      "data": {
+        "*elements": [
+          "urn:li:fsd_profilePositionGroup:(ACoAAFakeJamieLinSynthetic001,nimbus)",
+          "urn:li:fsd_profilePositionGroup:(ACoAAFakeJamieLinSynthetic001,dataforge)",
+          "urn:li:fsd_profilePositionGroup:(ACoAAFakeJamieLinSynthetic001,startwell)"
+        ],
+        "$type": "com.linkedin.restli.common.CollectionResponse"
+      },
+      "included": [
+        {
+          "entityUrn": "urn:li:fsd_profilePositionGroup:(ACoAAFakeJamieLinSynthetic001,nimbus)",
+          "dateRange": {
+            "start": {
+              "month": 3,
+              "year": 2023,
+              "$type": "com.linkedin.common.Date"
+            },
+            "$type": "com.linkedin.common.DateRange"
+          },
+          "companyName": "Nimbus Cloud Systems",
+          "companyUrn": "urn:li:fsd_company:900000101",
+          "$type": "com.linkedin.voyager.dash.identity.profile.PositionGroup"
+        },
+        {
+          "entityUrn": "urn:li:fsd_profilePositionGroup:(ACoAAFakeJamieLinSynthetic001,dataforge)",
+          "dateRange": {
+            "start": {
+              "month": 6,
+              "year": 2021,
+              "$type": "com.linkedin.common.Date"
+            },
+            "end": {
+              "month": 2,
+              "year": 2023,
+              "$type": "com.linkedin.common.Date"
+            },
+            "$type": "com.linkedin.common.DateRange"
+          },
+          "companyName": "DataForge Inc.",
+          "companyUrn": "urn:li:fsd_company:900000102",
+          "$type": "com.linkedin.voyager.dash.identity.profile.PositionGroup"
+        },
+        {
+          "entityUrn": "urn:li:fsd_profilePositionGroup:(ACoAAFakeJamieLinSynthetic001,startwell)",
+          "dateRange": {
+            "start": {
+              "month": 8,
+              "year": 2019,
+              "$type": "com.linkedin.common.Date"
+            },
+            "end": {
+              "month": 5,
+              "year": 2021,
+              "$type": "com.linkedin.common.Date"
+            },
+            "$type": "com.linkedin.common.DateRange"
+          },
+          "companyName": "StartWell Labs",
+          "companyUrn": "urn:li:fsd_company:900000103",
+          "$type": "com.linkedin.voyager.dash.identity.profile.PositionGroup"
+        }
+      ]
+    }
+  },
+  "profilePositions": {
+    "status": 200,
+    "body": {
+      "data": {
+        "*elements": [
+          "urn:li:fsd_profilePosition:(ACoAAFakeJamieLinSynthetic001,nimbus-1)",
+          "urn:li:fsd_profilePosition:(ACoAAFakeJamieLinSynthetic001,dataforge-1)"
+        ],
+        "$type": "com.linkedin.restli.common.CollectionResponse"
+      },
+      "included": [
+        {
+          "entityUrn": "urn:li:fsd_profilePosition:(ACoAAFakeJamieLinSynthetic001,nimbus-1)",
+          "companyUrn": "urn:li:fsd_company:900000101",
+          "title": "Senior Backend Engineer",
+          "$type": "com.linkedin.voyager.dash.identity.profile.Position"
+        },
+        {
+          "entityUrn": "urn:li:fsd_profilePosition:(ACoAAFakeJamieLinSynthetic001,dataforge-1)",
+          "companyUrn": "urn:li:fsd_company:900000102",
+          "title": "Backend Engineer",
+          "$type": "com.linkedin.voyager.dash.identity.profile.Position"
+        }
+      ]
+    }
+  },
+  "profileEducations": {
+    "status": 200,
+    "body": {
+      "data": {
+        "*elements": [
+          "urn:li:fsd_profileEducation:(ACoAAFakeJamieLinSynthetic001,1)"
+        ],
+        "$type": "com.linkedin.restli.common.CollectionResponse"
+      },
+      "included": [
+        {
+          "entityUrn": "urn:li:fsd_profileEducation:(ACoAAFakeJamieLinSynthetic001,1)",
+          "schoolName": "Riverside State University",
+          "schoolUrn": "urn:li:fsd_school:900000201",
+          "degreeName": "Master of Science",
+          "fieldOfStudy": "Computer Science",
+          "dateRange": {
+            "start": {
+              "year": 2017,
+              "$type": "com.linkedin.common.Date"
+            },
+            "end": {
+              "year": 2019,
+              "$type": "com.linkedin.common.Date"
+            },
+            "$type": "com.linkedin.common.DateRange"
+          },
+          "$type": "com.linkedin.voyager.dash.identity.profile.Education"
+        }
+      ]
+    }
+  },
+  "profileSkills": {
+    "status": 200,
+    "body": {
+      "data": {
+        "*elements": [
+          "urn:li:fsd_skill:(ACoAAFakeJamieLinSynthetic001,0)",
+          "urn:li:fsd_skill:(ACoAAFakeJamieLinSynthetic001,1)",
+          "urn:li:fsd_skill:(ACoAAFakeJamieLinSynthetic001,2)",
+          "urn:li:fsd_skill:(ACoAAFakeJamieLinSynthetic001,3)",
+          "urn:li:fsd_skill:(ACoAAFakeJamieLinSynthetic001,4)",
+          "urn:li:fsd_skill:(ACoAAFakeJamieLinSynthetic001,5)",
+          "urn:li:fsd_skill:(ACoAAFakeJamieLinSynthetic001,6)",
+          "urn:li:fsd_skill:(ACoAAFakeJamieLinSynthetic001,7)"
+        ],
+        "$type": "com.linkedin.restli.common.CollectionResponse"
+      },
+      "included": [
+        {
+          "entityUrn": "urn:li:fsd_skill:(ACoAAFakeJamieLinSynthetic001,0)",
+          "name": "Python",
+          "$type": "com.linkedin.voyager.dash.identity.profile.Skill"
+        },
+        {
+          "entityUrn": "urn:li:fsd_skill:(ACoAAFakeJamieLinSynthetic001,1)",
+          "name": "Distributed Systems",
+          "$type": "com.linkedin.voyager.dash.identity.profile.Skill"
+        },
+        {
+          "entityUrn": "urn:li:fsd_skill:(ACoAAFakeJamieLinSynthetic001,2)",
+          "name": "Kubernetes",
+          "$type": "com.linkedin.voyager.dash.identity.profile.Skill"
+        },
+        {
+          "entityUrn": "urn:li:fsd_skill:(ACoAAFakeJamieLinSynthetic001,3)",
+          "name": "PostgreSQL",
+          "$type": "com.linkedin.voyager.dash.identity.profile.Skill"
+        },
+        {
+          "entityUrn": "urn:li:fsd_skill:(ACoAAFakeJamieLinSynthetic001,4)",
+          "name": "Go",
+          "$type": "com.linkedin.voyager.dash.identity.profile.Skill"
+        },
+        {
+          "entityUrn": "urn:li:fsd_skill:(ACoAAFakeJamieLinSynthetic001,5)",
+          "name": "gRPC",
+          "$type": "com.linkedin.voyager.dash.identity.profile.Skill"
+        },
+        {
+          "entityUrn": "urn:li:fsd_skill:(ACoAAFakeJamieLinSynthetic001,6)",
+          "name": "System Design",
+          "$type": "com.linkedin.voyager.dash.identity.profile.Skill"
+        },
+        {
+          "entityUrn": "urn:li:fsd_skill:(ACoAAFakeJamieLinSynthetic001,7)",
+          "name": "Mentoring",
+          "$type": "com.linkedin.voyager.dash.identity.profile.Skill"
+        }
+      ]
+    }
+  },
+  "profileCertifications": {
+    "status": 200,
+    "body": {
+      "data": {
+        "*elements": [
+          "urn:li:fsd_profileCertification:(ACoAAFakeJamieLinSynthetic001,1)",
+          "urn:li:fsd_profileCertification:(ACoAAFakeJamieLinSynthetic001,2)"
+        ],
+        "$type": "com.linkedin.restli.common.CollectionResponse"
+      },
+      "included": [
+        {
+          "entityUrn": "urn:li:fsd_profileCertification:(ACoAAFakeJamieLinSynthetic001,1)",
+          "name": "Certified Kubernetes Administrator",
+          "authority": "The Linux Foundation",
+          "companyUrn": "urn:li:fsd_company:900000301",
+          "url": "https://example.org/cka/verify/12345",
+          "licenseNumber": "CKA-2022-88213",
+          "dateRange": {
+            "start": {
+              "month": 9,
+              "year": 2022,
+              "$type": "com.linkedin.common.Date"
+            },
+            "$type": "com.linkedin.common.DateRange"
+          },
+          "$type": "com.linkedin.voyager.dash.identity.profile.Certification"
+        },
+        {
+          "entityUrn": "urn:li:fsd_profileCertification:(ACoAAFakeJamieLinSynthetic001,2)",
+          "name": "AWS Certified Solutions Architect",
+          "authority": "Amazon Web Services",
+          "companyUrn": "urn:li:fsd_company:900000302",
+          "url": null,
+          "licenseNumber": null,
+          "dateRange": {
+            "start": {
+              "month": 4,
+              "year": 2021,
+              "$type": "com.linkedin.common.Date"
+            },
+            "$type": "com.linkedin.common.DateRange"
+          },
+          "$type": "com.linkedin.voyager.dash.identity.profile.Certification"
+        }
+      ]
+    }
+  },
+  "profileLanguages": {
+    "status": 200,
+    "body": {
+      "data": {
+        "*elements": [
+          "urn:li:fsd_profileLanguage:(ACoAAFakeJamieLinSynthetic001,1)",
+          "urn:li:fsd_profileLanguage:(ACoAAFakeJamieLinSynthetic001,2)"
+        ],
+        "$type": "com.linkedin.restli.common.CollectionResponse"
+      },
+      "included": [
+        {
+          "entityUrn": "urn:li:fsd_profileLanguage:(ACoAAFakeJamieLinSynthetic001,1)",
+          "name": "English",
+          "proficiency": "NATIVE_OR_BILINGUAL",
+          "$type": "com.linkedin.voyager.dash.identity.profile.Language"
+        },
+        {
+          "entityUrn": "urn:li:fsd_profileLanguage:(ACoAAFakeJamieLinSynthetic001,2)",
+          "name": "Mandarin",
+          "proficiency": "PROFESSIONAL_WORKING",
+          "$type": "com.linkedin.voyager.dash.identity.profile.Language"
+        }
+      ]
+    }
+  },
+  "profileCourses": {
+    "status": 200,
+    "body": {
+      "data": {
+        "*elements": [],
+        "$type": "com.linkedin.restli.common.CollectionResponse"
+      },
+      "included": []
+    }
+  },
+  "profileProjects": {
+    "status": 200,
+    "body": {
+      "data": {
+        "*elements": [],
+        "$type": "com.linkedin.restli.common.CollectionResponse"
+      },
+      "included": []
+    }
+  },
+  "profileHonors": {
+    "status": 200,
+    "body": {
+      "data": {
+        "*elements": [],
+        "$type": "com.linkedin.restli.common.CollectionResponse"
+      },
+      "included": []
+    }
+  },
+  "profileVolunteerExperiences": {
+    "status": 200,
+    "body": {
+      "data": {
+        "*elements": [],
+        "$type": "com.linkedin.restli.common.CollectionResponse"
+      },
+      "included": []
+    }
+  }
+}

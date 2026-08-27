@@ -1,0 +1,221 @@
+{
+  "urn": "urn:li:fsd_profile:ACoAAFakeMorganColeSynthetic002",
+  "profile": {
+    "status": 200,
+    "body": {
+      "data": {
+        "*elements": [
+          "urn:li:fsd_profile:ACoAAFakeMorganColeSynthetic002"
+        ],
+        "$type": "com.linkedin.restli.common.CollectionResponse"
+      },
+      "included": [
+        {
+          "entityUrn": "urn:li:fsd_profile:ACoAAFakeMorganColeSynthetic002",
+          "objectUrn": "urn:li:member:200000002",
+          "publicIdentifier": "morgan-cole-founder",
+          "firstName": "Morgan",
+          "lastName": "Cole",
+          "headline": "Founder & CTO at Northstar Robotics | Building autonomous systems",
+          "summary": null,
+          "location": {
+            "countryCode": "US",
+            "$type": "com.linkedin.voyager.dash.identity.profile.ProfileLocation"
+          },
+          "geoLocation": {
+            "geoUrn": "urn:li:fsd_geo:900000401",
+            "$type": "com.linkedin.voyager.dash.identity.profile.ProfileGeoLocation"
+          },
+          "industryUrn": "urn:li:fsd_industry:4",
+          "websites": [],
+          "premium": true,
+          "showVerificationBadge": true,
+          "profilePicture": null,
+          "backgroundPicture": null,
+          "$type": "com.linkedin.voyager.dash.identity.profile.Profile"
+        }
+      ]
+    }
+  },
+  "profilePositionGroups": {
+    "status": 200,
+    "body": {
+      "data": {
+        "*elements": [
+          "urn:li:fsd_profilePositionGroup:(ACoAAFakeMorganColeSynthetic002,northstar)"
+        ],
+        "$type": "com.linkedin.restli.common.CollectionResponse"
+      },
+      "included": [
+        {
+          "entityUrn": "urn:li:fsd_profilePositionGroup:(ACoAAFakeMorganColeSynthetic002,northstar)",
+          "dateRange": {
+            "start": {
+              "month": 1,
+              "year": 2015,
+              "$type": "com.linkedin.common.Date"
+            },
+            "$type": "com.linkedin.common.DateRange"
+          },
+          "companyName": "Northstar Robotics",
+          "companyUrn": "urn:li:fsd_company:900000401",
+          "$type": "com.linkedin.voyager.dash.identity.profile.PositionGroup"
+        }
+      ]
+    }
+  },
+  "profileEducations": {
+    "status": 200,
+    "body": {
+      "data": {
+        "*elements": [
+          "urn:li:fsd_profileEducation:(ACoAAFakeMorganColeSynthetic002,edu1)",
+          "urn:li:fsd_profileEducation:(ACoAAFakeMorganColeSynthetic002,edu2)"
+        ],
+        "$type": "com.linkedin.restli.common.CollectionResponse"
+      },
+      "included": [
+        {
+          "entityUrn": "urn:li:fsd_profileEducation:(ACoAAFakeMorganColeSynthetic002,edu1)",
+          "schoolName": "Cascadia Institute of Technology",
+          "schoolUrn": "urn:li:fsd_school:900000501",
+          "degreeName": "Bachelor of Science",
+          "fieldOfStudy": "Electrical Engineering",
+          "dateRange": {
+            "start": {
+              "year": 2009,
+              "$type": "com.linkedin.common.Date"
+            },
+            "end": {
+              "year": 2013,
+              "$type": "com.linkedin.common.Date"
+            },
+            "$type": "com.linkedin.common.DateRange"
+          },
+          "$type": "com.linkedin.voyager.dash.identity.profile.Education"
+        },
+        {
+          "entityUrn": "urn:li:fsd_profileEducation:(ACoAAFakeMorganColeSynthetic002,edu2)",
+          "schoolName": "Alderbrook Graduate School of Business",
+          "schoolUrn": "urn:li:fsd_school:900000502",
+          "degreeName": "Master of Business Administration",
+          "fieldOfStudy": null,
+          "dateRange": {
+            "start": {
+              "year": 2013,
+              "$type": "com.linkedin.common.Date"
+            },
+            "end": {
+              "year": 2015,
+              "$type": "com.linkedin.common.Date"
+            },
+            "$type": "com.linkedin.common.DateRange"
+          },
+          "$type": "com.linkedin.voyager.dash.identity.profile.Education"
+        }
+      ]
+    }
+  },
+  "profileSkills": {
+    "status": 200,
+    "body": {
+      "data": {
+        "*elements": [
+          "urn:li:fsd_skill:(ACoAAFakeMorganColeSynthetic002,0)",
+          "urn:li:fsd_skill:(ACoAAFakeMorganColeSynthetic002,1)",
+          "urn:li:fsd_skill:(ACoAAFakeMorganColeSynthetic002,2)",
+          "urn:li:fsd_skill:(ACoAAFakeMorganColeSynthetic002,3)",
+          "urn:li:fsd_skill:(ACoAAFakeMorganColeSynthetic002,4)"
+        ],
+        "$type": "com.linkedin.restli.common.CollectionResponse"
+      },
+      "included": [
+        {
+          "entityUrn": "urn:li:fsd_skill:(ACoAAFakeMorganColeSynthetic002,0)",
+          "name": "Robotics",
+          "$type": "com.linkedin.voyager.dash.identity.profile.Skill"
+        },
+        {
+          "entityUrn": "urn:li:fsd_skill:(ACoAAFakeMorganColeSynthetic002,1)",
+          "name": "Product Strategy",
+          "$type": "com.linkedin.voyager.dash.identity.profile.Skill"
+        },
+        {
+          "entityUrn": "urn:li:fsd_skill:(ACoAAFakeMorganColeSynthetic002,2)",
+          "name": "Fundraising",
+          "$type": "com.linkedin.voyager.dash.identity.profile.Skill"
+        },
+        {
+          "entityUrn": "urn:li:fsd_skill:(ACoAAFakeMorganColeSynthetic002,3)",
+          "name": "Team Leadership",
+          "$type": "com.linkedin.voyager.dash.identity.profile.Skill"
+        },
+        {
+          "entityUrn": "urn:li:fsd_skill:(ACoAAFakeMorganColeSynthetic002,4)",
+          "name": "Embedded Systems",
+          "$type": "com.linkedin.voyager.dash.identity.profile.Skill"
+        }
+      ]
+    }
+  },
+  "profileCertifications": {
+    "status": 200,
+    "body": {
+      "data": {
+        "*elements": [],
+        "$type": "com.linkedin.restli.common.CollectionResponse"
+      },
+      "included": []
+    }
+  },
+  "profileLanguages": {
+    "status": 200,
+    "body": {
+      "data": {
+        "*elements": [],
+        "$type": "com.linkedin.restli.common.CollectionResponse"
+      },
+      "included": []
+    }
+  },
+  "profileCourses": {
+    "status": 200,
+    "body": {
+      "data": {
+        "*elements": [],
+        "$type": "com.linkedin.restli.common.CollectionResponse"
+      },
+      "included": []
+    }
+  },
+  "profileProjects": {
+    "status": 200,
+    "body": {
+      "data": {
+        "*elements": [],
+        "$type": "com.linkedin.restli.common.CollectionResponse"
+      },
+      "included": []
+    }
+  },
+  "profileHonors": {
+    "status": 200,
+    "body": {
+      "data": {
+        "*elements": [],
+        "$type": "com.linkedin.restli.common.CollectionResponse"
+      },
+      "included": []
+    }
+  },
+  "profileVolunteerExperiences": {
+    "status": 200,
+    "body": {
+      "data": {
+        "*elements": [],
+        "$type": "com.linkedin.restli.common.CollectionResponse"
+      },
+      "included": []
+    }
+  }
+}
