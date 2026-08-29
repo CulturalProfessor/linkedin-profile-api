@@ -324,7 +324,11 @@ before a fetch you care about - see the session notes above.
 ## Deployment
 
 Any host that runs a standard ASGI app works (Railway, Render, Fly.io).
-Start command:
+
+`.python-version` pins CPython 3.12 deliberately. Hosts that default to a
+newer interpreter have no prebuilt `pydantic-core` wheel for it yet and fall
+back to compiling it from Rust source, which fails on build images with a
+read-only cargo cache. Start command:
 
 ```bash
 uvicorn app.main:app --host 0.0.0.0 --port $PORT
