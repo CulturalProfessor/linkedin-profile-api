@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 
 from app import fields as field_spec
 from app.cache import DiskCache, UpstashCache
-from app.config import settings
+from app.config import get_settings
 from app.denormalize import denormalize
 from app.models import Meta, ProfileResponse
 from app.quota import InMemoryQuotaBackend, UpstashQuotaBackend
@@ -33,6 +33,10 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+# Read once at import. get_settings() is lru_cached, so this is the same object
+# every other caller gets; tests swap it out or build their own Settings.
+settings = get_settings()
 
 
 @asynccontextmanager

@@ -323,6 +323,28 @@ python3 tools/check_session.py   # one request: is the configured session live?
 `check_session.py` opens its own connection, so avoid running it immediately
 before a fetch you care about - see the session notes above.
 
+## Configuration
+
+Settings live in [`app/config.py`](app/config.py) as a `pydantic-settings`
+`BaseSettings`, read through an `lru_cache`d `get_settings()`. Two properties
+matter:
+
+- **Values are read when `Settings()` is called, not at import.** This was
+  previously a frozen dataclass whose field defaults called `os.getenv()` at
+  *class-definition* time, so the values were fixed at import and
+  `monkeypatch.setenv` could not reach them. Tests had to exercise private
+  helpers instead of the real object, and overriding anything meant
+  `object.__setattr__` to get past the frozen dataclass. Both workarounds are
+  gone; `tests/test_config.py` now drives the real `Settings`.
+- **A blank value means "unset", not `""`.** `cp .env.example .env` leaves
+  `DAILY_QUOTA=` behind, and the environment reports that as an empty string
+  rather than as absent - which used to make `int("")` raise at import: a boot
+  loop on a host, with a traceback naming neither the variable nor the file.
+
+Invalid configuration raises `ConfigError` at startup rather than booting
+half-working, and the message names the **environment variable** (`DAILY_QUOTA`)
+rather than the pydantic field, because that is what the operator actually set.
+
 ## CI
 
 [`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `ruff check` and

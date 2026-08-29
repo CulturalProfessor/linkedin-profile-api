@@ -7,25 +7,27 @@ from app.voyager_client import extract_cookie_value
 @pytest.fixture
 def no_backend_session():
     """Clears the backend demo session for the duration of a test, so tests
-    that pass caller headers aren't affected by whatever's actually
-    configured in the environment's .env - `settings` is a module-level
-    singleton shared across the whole test session, and this repo is
-    routinely run with a real LINKEDIN_FULL_COOKIE set for live testing.
-    Settings is a frozen dataclass, so plain attribute assignment (including
-    monkeypatch.setattr, which calls builtin setattr()) would hit
-    FrozenInstanceError - object.__setattr__ bypasses that.
+    that pass caller headers aren't affected by whatever's actually configured
+    in the environment's .env - `settings` is a module-level singleton shared
+    across the whole test session, and this repo is routinely run with a real
+    LINKEDIN_FULL_COOKIE set for live testing.
+
+    Plain setattr, because Settings is a pydantic model rather than a frozen
+    dataclass. This used to need object.__setattr__ to get past
+    FrozenInstanceError - a workaround the tests carried purely because of how
+    config was built.
     """
     import app.main as main
 
     attrs = ("full_cookie", "li_at", "jsessionid")
     originals = {attr: getattr(main.settings, attr) for attr in attrs}
     for attr in attrs:
-        object.__setattr__(main.settings, attr, None)
+        setattr(main.settings, attr, None)
     try:
         yield
     finally:
         for attr, value in originals.items():
-            object.__setattr__(main.settings, attr, value)
+            setattr(main.settings, attr, value)
 
 
 def test_extract_cookie_value_handles_quotes_and_siblings():

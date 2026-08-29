@@ -10,10 +10,13 @@ import base64
 import binascii
 import json
 import os
-from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 from dotenv import load_dotenv
+from pydantic import AliasChoices, Field, ValidationError, field_validator
+from pydantic_core import PydanticUseDefault
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # The path is derived from this file, not searched for: the default lookup
 # walks up from the *current working directory*, so `uvicorn app.main:app`
@@ -43,43 +46,6 @@ class ConfigError(RuntimeError):
     indistinguishable from an expired session and from a cookie that was never
     configured - three very different problems wearing the same error message.
     """
-
-
-def _raw(name: str) -> str | None:
-    """A variable set to an empty string means 'not configured', not ''.
-
-    os.getenv(name, default) only returns the default when the variable is
-    *absent*, so `DAILY_QUOTA=` in a .env (which is exactly what copying
-    .env.example leaves behind) yields "" and then int("") raises at import -
-    a boot loop on a host, with a traceback that names neither the variable
-    nor the file.
-    """
-    value = os.getenv(name)
-    if value is None or not value.strip():
-        return None
-    return value.strip()
-
-
-def _bool(name: str, default: bool) -> bool:
-    raw = _raw(name)
-    if raw is None:
-        return default
-    return raw.lower() in {"1", "true", "yes", "on"}
-
-
-def _number(name: str, default: str, cast):
-    raw = _raw(name) or default
-    try:
-        return cast(raw)
-    except ValueError as exc:
-        raise ConfigError(
-            f"{name} must be a number, got {raw!r}. Leave it unset or blank to "
-            f"use the default ({default})."
-        ) from exc
-
-
-def _text(name: str, default: str) -> str:
-    return _raw(name) or default
 
 
 def _full_cookie() -> str | None:
@@ -169,24 +135,70 @@ def _check_cookie(cookie: str, source: str) -> str:
     return cookie
 
 
-@dataclass(frozen=True)
-class Settings:
+class Settings(BaseSettings):
+    """Runtime configuration, validated at *instantiation*.
+
+    That word is the whole point of this class's shape. This was previously a
+    frozen dataclass whose field defaults called os.getenv() at
+    class-definition time, which meant the values were frozen at import and
+    `monkeypatch.setenv` could never affect them. Tests had to exercise the
+    private `_raw`/`_number`/`_bool` helpers instead of the object the
+    application actually uses, and anything wanting to override a setting had
+    to go through `object.__setattr__` to get past the frozen dataclass. The
+    tests were shaped around the defect rather than testing the thing.
+
+    Now: `Settings()` reads the environment when it is called, so a test can
+    set an env var and build one, or bypass the environment entirely with
+    `Settings(daily_quota=5)`. `get_settings()` below is the cached accessor
+    the application uses.
+    """
+
+    model_config = SettingsConfigDict(
+        # Unrelated variables (PATH, RENDER_*, ...) are not this class's
+        # business, and erroring on them would make the app un-deployable.
+        extra="ignore",
+        case_sensitive=False,
+        # Every alias below is an AliasChoices listing the field name *then*
+        # the env var, so `Settings(daily_quota=5)` works as well as
+        # DAILY_QUOTA=5. Two subtleties, both found the hard way:
+        #
+        # populate_by_name does not cover this on its own - in pydantic v2 it
+        # extends `alias`, not `validation_alias`, so a plain validation_alias
+        # silently ignores the keyword argument, leaving the object exactly as
+        # untestable as the frozen dataclass it replaced.
+        #
+        # And the order within AliasChoices matters: env values arrive keyed by
+        # the uppercase alias while init keyword arguments arrive keyed by the
+        # field name, so both can be present at once and AliasChoices takes the
+        # first one it finds. With the env name first, an explicit
+        # Settings(daily_quota=5) was silently losing to DAILY_QUOTA from .env.
+        populate_by_name=True,
+        # .env is loaded by load_dotenv above rather than by pydantic, on
+        # purpose - see the note at the top of this module about override=True.
+        # Letting pydantic read it too would reverse that precedence.
+    )
+
     # Optional backend session, used only when the caller sends no session of
     # their own. Both halves are needed: li_at authenticates, JSESSIONID is the
     # CSRF token.
-    li_at: str | None = _raw("LINKEDIN_LI_AT")
-    jsessionid: str | None = _raw("LINKEDIN_JSESSIONID")
+    li_at: str | None = Field(default=None, validation_alias=AliasChoices("li_at", "LINKEDIN_LI_AT"))
+    jsessionid: str | None = Field(
+        default=None, validation_alias=AliasChoices("jsessionid", "LINKEDIN_JSESSIONID")
+    )
 
     # Preferred over li_at/jsessionid when set: the *entire* Cookie header
     # value captured from a real request (DevTools -> Network -> Copy as
     # cURL). Replaying the full cookie jar instead of just li_at+JSESSIONID
     # in isolation is a meaningfully weaker anomaly-detection signal - see
     # app/voyager_client.py and README's auth model section.
-    full_cookie: str | None = _full_cookie()
+    #
+    # default_factory rather than an alias because this is derived from two
+    # variables with a preference order and custom decoding; passing it
+    # explicitly (as tests do) still overrides.
+    full_cookie: str | None = Field(default_factory=_full_cookie)
 
     # Browser fingerprint captured with the cookie (see _browser_headers).
-    # default_factory because dataclasses reject a mutable default.
-    browser_headers: dict = field(default_factory=_browser_headers)
+    browser_headers: dict[str, str] = Field(default_factory=_browser_headers)
 
     # Shared secret required on /profile when the request would spend the
     # *backend* session. Unset means no key is required - fine locally, but a
@@ -194,37 +206,72 @@ class Settings:
     # that LinkedIn account: anyone who finds the URL can scrape through it on
     # your identity and burn your daily quota. app.main warns loudly at startup
     # when that combination is configured.
-    api_key: str | None = _raw("API_KEY")
+    api_key: str | None = Field(default=None, validation_alias=AliasChoices("api_key", "API_KEY"))
 
     # Kill switch. When false, the API never touches LinkedIn and serves only
     # cached profiles. Flip this if anything looks wrong in production.
-    allow_live: bool = _bool("ALLOW_LIVE", True)
+    allow_live: bool = Field(default=True, validation_alias=AliasChoices("allow_live", "ALLOW_LIVE"))
 
     # Hard ceiling on live fetches per calendar day, across all callers.
     # Caps account exposure at a number we choose, not one the traffic chooses.
-    daily_quota: int = _number("DAILY_QUOTA", "150", int)
+    daily_quota: int = Field(default=150, gt=0, validation_alias=AliasChoices("daily_quota", "DAILY_QUOTA"))
 
     # Politeness delay bounds (seconds) between live requests. Jittered to avoid
     # the even-interval timing signature that behavioural detection keys on.
-    min_delay: float = _number("MIN_DELAY", "0.5", float)
-    max_delay: float = _number("MAX_DELAY", "1.5", float)
+    min_delay: float = Field(default=0.5, ge=0, validation_alias=AliasChoices("min_delay", "MIN_DELAY"))
+    max_delay: float = Field(default=1.5, ge=0, validation_alias=AliasChoices("max_delay", "MAX_DELAY"))
 
-    cache_dir: str = _text("CACHE_DIR", ".cache")
+    cache_dir: str = Field(default=".cache", validation_alias=AliasChoices("cache_dir", "CACHE_DIR"))
 
     # Where cached profiles live: "auto" (default) uses Upstash when it's
     # configured and falls back to disk, "disk" and "upstash" force one.
     # Upstash is strongly preferred for a deployment: Render's free tier
     # replaces the container on every deploy and after ~15 minutes idle,
-    # taking the disk cache with it, which leaves the TTL and the stale-
+    # taking a disk cache with it, which leaves the TTL and the stale-
     # serving paths with almost nothing to work on.
-    cache_backend: str = _text("CACHE_BACKEND", "auto").lower()
+    cache_backend: str = Field(
+        default="auto", validation_alias=AliasChoices("cache_backend", "CACHE_BACKEND")
+    )
 
     # Shared daily-quota counter (Upstash Redis REST API). When both are set,
     # local runs and the deployed server draw down the same daily quota
     # against the same LinkedIn account instead of each counting on its own.
     # Falls back to a process-local in-memory counter when unset.
-    upstash_redis_rest_url: str | None = _raw("UPSTASH_REDIS_REST_URL")
-    upstash_redis_rest_token: str | None = _raw("UPSTASH_REDIS_REST_TOKEN")
+    upstash_redis_rest_url: str | None = Field(
+        default=None, validation_alias=AliasChoices("upstash_redis_rest_url", "UPSTASH_REDIS_REST_URL")
+    )
+    upstash_redis_rest_token: str | None = Field(
+        default=None, validation_alias=AliasChoices("upstash_redis_rest_token", "UPSTASH_REDIS_REST_TOKEN")
+    )
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _blank_means_unset(cls, value):
+        """A variable set to an empty string means 'not configured', not ''.
+
+        `cp .env.example .env` leaves `DAILY_QUOTA=` behind, and the
+        environment reports that as "" rather than as absent - which then made
+        int("") raise at import: a boot loop on a host, with a traceback naming
+        neither the variable nor the file. PydanticUseDefault is the supported
+        way to say "treat this as if it were never set".
+        """
+        if isinstance(value, str) and not value.strip():
+            raise PydanticUseDefault
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("cache_backend")
+    @classmethod
+    def _known_backend(cls, value: str) -> str:
+        value = value.lower()
+        if value not in {"auto", "disk", "upstash"}:
+            raise ValueError(f"must be auto, disk or upstash, got {value!r}")
+        return value
+
+    def has_backend_session(self) -> bool:
+        return bool(self.full_cookie or (self.li_at and self.jsessionid))
+
+    def has_shared_quota_store(self) -> bool:
+        return bool(self.upstash_redis_rest_url and self.upstash_redis_rest_token)
 
     def requires_api_key(self) -> bool:
         """Only meaningful when there is a backend session to protect. With no
@@ -232,12 +279,6 @@ class Settings:
         spends their own account's risk budget, so there is nothing for a key
         to guard."""
         return bool(self.api_key and self.has_backend_session())
-
-    def has_backend_session(self) -> bool:
-        return bool(self.full_cookie or (self.li_at and self.jsessionid))
-
-    def has_shared_quota_store(self) -> bool:
-        return bool(self.upstash_redis_rest_url and self.upstash_redis_rest_token)
 
     def use_upstash_cache(self) -> bool:
         if self.cache_backend == "disk":
@@ -250,11 +291,48 @@ class Settings:
                     "use CACHE_BACKEND=disk."
                 )
             return True
-        if self.cache_backend != "auto":
-            raise ConfigError(
-                f"CACHE_BACKEND must be auto, disk or upstash, got {self.cache_backend!r}."
-            )
         return self.has_shared_quota_store()
 
 
-settings = Settings()
+def _env_name(field: str) -> str:
+    """The environment variable a field is set from, for error messages.
+
+    Pydantic reports failures against the field name (`daily_quota`), but the
+    operator set `DAILY_QUOTA` in a .env or a hosting dashboard. Naming the
+    field would send them looking for something that appears nowhere in their
+    configuration.
+    """
+    alias = getattr(Settings.model_fields.get(field), "validation_alias", None)
+    for choice in getattr(alias, "choices", []):
+        if isinstance(choice, str) and choice.isupper():
+            return choice
+    return str(field)
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """The application's settings, built once.
+
+    Cached because reading and validating the environment on every request is
+    pointless, and because two Settings objects disagreeing about the daily
+    quota would be a genuinely confusing bug. Tests that change the
+    environment call `get_settings.cache_clear()`.
+
+    Pydantic's ValidationError is re-raised as ConfigError so the failure keeps
+    the shape the rest of this module promises: the process refuses to start,
+    and the message names the variable rather than a field path.
+    """
+    try:
+        return Settings()
+    except ValidationError as exc:
+        problems = "; ".join(
+            f"{_env_name(e['loc'][0]) if e['loc'] else 'config'}: {e['msg']}"
+            for e in exc.errors()
+        )
+        raise ConfigError(
+            f"invalid configuration - {problems}. Leave a variable unset or "
+            "blank to use its default."
+        ) from exc
+
+
+settings = get_settings()

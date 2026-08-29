@@ -62,9 +62,10 @@ def api(tmp_path, monkeypatch):
     }
 
     def configure(**kwargs):
+        # Plain setattr: Settings is a pydantic model now, not a frozen
+        # dataclass that needed object.__setattr__ to get past it.
         for key, value in kwargs.items():
-            # Settings is a frozen dataclass; setattr raises FrozenInstanceError.
-            object.__setattr__(main.settings, key, value)
+            setattr(main.settings, key, value)
 
     configure(full_cookie=None, li_at=None, jsessionid=None, api_key=None,
       allow_live=True, daily_quota=10, min_delay=0.0, max_delay=0.0)
