@@ -14,12 +14,18 @@ class ExperienceEntry(BaseModel):
     company: str
     company_urn: str | None = None
     title: str | None = None
+    description: str | None = None
+    location: str | None = None
     start: str | None = None
     end: str | None = None
 
 
 class EducationEntry(BaseModel):
-    school: str
+    # Nullable: LinkedIn returns entries carrying only a schoolUrn, with
+    # schoolName null and no School entity in the response to resolve it
+    # against. Dropping those would lose a real education entry, so the
+    # urn is returned and the name left null.
+    school: str | None = None
     school_urn: str | None = None
     degree: str | None = None
     field_of_study: str | None = None
@@ -28,7 +34,7 @@ class EducationEntry(BaseModel):
 
 
 class CertificationEntry(BaseModel):
-    name: str
+    name: str | None = None
     authority: str | None = None
     url: str | None = None
     license_number: str | None = None

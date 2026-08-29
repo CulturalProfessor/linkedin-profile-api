@@ -1,0 +1,125 @@
+{
+  "urn": "urn:li:fsd_profile:ACoAAFakeAvaReyesSynthetic003",
+  "_note": "Fully synthetic. Covers the case profilePositionGroups alone gets wrong: several sequential roles at one company, each with its own date range, plus a geoUrn on a position that matches the profile's own geoUrn so the city can be resolved without a separate geo call. Also covers a company that has a position group but no position entity.",
+  "profile": {
+    "body": {
+      "data": {
+        "$type": "com.linkedin.restli.common.CollectionResponse",
+        "*elements": ["urn:li:fsd_profile:ACoAAFakeAvaReyesSynthetic003"]
+      },
+      "included": [
+        {
+          "$type": "com.linkedin.voyager.dash.identity.profile.Profile",
+          "entityUrn": "urn:li:fsd_profile:ACoAAFakeAvaReyesSynthetic003",
+          "publicIdentifier": "ava-reyes-synthetic",
+          "firstName": "Ava",
+          "lastName": "Reyes",
+          "headline": "VP Engineering at Helio Systems",
+          "summary": "Synthetic profile used to exercise multi-role date handling.",
+          "locationName": null,
+          "address": null,
+          "location": {
+            "$type": "com.linkedin.voyager.dash.identity.profile.ProfileLocation",
+            "countryCode": "US"
+          },
+          "geoLocation": {
+            "$type": "com.linkedin.voyager.dash.identity.profile.ProfileGeoLocation",
+            "geoUrn": "urn:li:fsd_geo:900000501"
+          },
+          "profilePicture": null,
+          "backgroundPicture": null
+        }
+      ]
+    }
+  },
+  "profilePositionGroups": {
+    "body": {
+      "data": {
+        "$type": "com.linkedin.restli.common.CollectionResponse",
+        "*elements": [
+          "urn:li:fsd_profilePositionGroup:(ACoAAFakeAvaReyesSynthetic003,helio)",
+          "urn:li:fsd_profilePositionGroup:(ACoAAFakeAvaReyesSynthetic003,quietfoundry)"
+        ]
+      },
+      "included": [
+        {
+          "$type": "com.linkedin.voyager.dash.identity.profile.PositionGroup",
+          "entityUrn": "urn:li:fsd_profilePositionGroup:(ACoAAFakeAvaReyesSynthetic003,helio)",
+          "companyName": "Helio Systems",
+          "companyUrn": "urn:li:fsd_company:900000501",
+          "dateRange": {
+            "$type": "com.linkedin.common.DateRange",
+            "start": {"$type": "com.linkedin.common.Date", "year": 2018, "month": 4}
+          }
+        },
+        {
+          "$type": "com.linkedin.voyager.dash.identity.profile.PositionGroup",
+          "entityUrn": "urn:li:fsd_profilePositionGroup:(ACoAAFakeAvaReyesSynthetic003,quietfoundry)",
+          "companyName": "Quiet Foundry",
+          "companyUrn": "urn:li:fsd_company:900000502",
+          "dateRange": {
+            "$type": "com.linkedin.common.DateRange",
+            "start": {"$type": "com.linkedin.common.Date", "year": 2015, "month": 9},
+            "end": {"$type": "com.linkedin.common.Date", "year": 2018, "month": 3}
+          }
+        }
+      ]
+    }
+  },
+  "profilePositions": {
+    "body": {
+      "data": {
+        "$type": "com.linkedin.restli.common.CollectionResponse",
+        "*elements": [
+          "urn:li:fsd_profilePosition:(ACoAAFakeAvaReyesSynthetic003,helio-vp)",
+          "urn:li:fsd_profilePosition:(ACoAAFakeAvaReyesSynthetic003,helio-staff)"
+        ]
+      },
+      "included": [
+        {
+          "$type": "com.linkedin.voyager.dash.identity.profile.Position",
+          "entityUrn": "urn:li:fsd_profilePosition:(ACoAAFakeAvaReyesSynthetic003,helio-vp)",
+          "title": "VP Engineering ",
+          "companyName": "Helio Systems",
+          "companyUrn": "urn:li:fsd_company:900000501",
+          "description": "Lead a platform org of 40.",
+          "geoUrn": "urn:li:fsd_geo:900000501",
+          "geoLocationName": "Denver Metropolitan Area",
+          "locationName": "Denver Metropolitan Area",
+          "dateRange": {
+            "$type": "com.linkedin.common.DateRange",
+            "start": {"$type": "com.linkedin.common.Date", "year": 2022, "month": 1}
+          }
+        },
+        {
+          "$type": "com.linkedin.voyager.dash.identity.profile.Position",
+          "entityUrn": "urn:li:fsd_profilePosition:(ACoAAFakeAvaReyesSynthetic003,helio-staff)",
+          "title": "Staff Engineer",
+          "companyName": "Helio Systems",
+          "companyUrn": "urn:li:fsd_company:900000501",
+          "description": null,
+          "geoUrn": "urn:li:fsd_geo:900000502",
+          "geoLocationName": "Boulder, Colorado, United States",
+          "locationName": "Boulder, Colorado, United States",
+          "dateRange": {
+            "$type": "com.linkedin.common.DateRange",
+            "start": {"$type": "com.linkedin.common.Date", "year": 2018, "month": 4},
+            "end": {"$type": "com.linkedin.common.Date", "year": 2021, "month": 12}
+          }
+        }
+      ]
+    }
+  },
+  "profileEducations": {
+    "body": {"data": {"$type": "com.linkedin.restli.common.CollectionResponse", "*elements": []}, "included": []}
+  },
+  "profileSkills": {
+    "body": {"data": {"$type": "com.linkedin.restli.common.CollectionResponse", "*elements": []}, "included": []}
+  },
+  "profileCertifications": {
+    "body": {"data": {"$type": "com.linkedin.restli.common.CollectionResponse", "*elements": []}, "included": []}
+  },
+  "profileLanguages": {
+    "body": {"data": {"$type": "com.linkedin.restli.common.CollectionResponse", "*elements": []}, "included": []}
+  }
+}

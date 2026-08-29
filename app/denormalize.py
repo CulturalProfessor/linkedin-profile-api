@@ -67,47 +67,126 @@ def _extract_profile_entity(section: Json) -> Json | None:
     return None
 
 
-def _titles_by_company(positions_section: Json | None) -> dict[str, list[str]]:
-    """Best-effort join of individual position titles onto their company.
+def _clean(value: Any) -> str | None:
+    """Voyager returns human-entered strings verbatim, trailing spaces and
+    all (e.g. a real title of "Managing Director ")."""
+    if not isinstance(value, str):
+        return None
+    return value.strip() or None
 
-    The `profilePositions` endpoint (titles live here, not on the position
-    *group*) hasn't been captured in a fixture yet - see README limitations.
-    If/when `raw["profilePositions"]` is populated this groups titles by
-    companyUrn so `_experience` can attach them; until then this returns {}.
+
+def _geo_names(raw: dict[str, Json]) -> dict[str, str]:
+    """geoUrn -> readable place name, harvested from the positions section.
+
+    The profile entity carries only `geoLocation.geoUrn` and a bare
+    `location.countryCode` - the readable city string is genuinely absent
+    from that response (its `included` bag holds the Profile and nothing
+    else). Each Position, however, carries both its own `geoUrn` *and* the
+    resolved `geoLocationName`. So when a member's profile location matches
+    one of their role locations - the common case - the profile's geoUrn can
+    be resolved for free against data already fetched, instead of via the
+    separate undocumented geo-resolve call. When it doesn't match we fall
+    back to the country code and say so in `limitations`.
     """
-    if not positions_section:
+    section = raw.get("profilePositions")
+    if not section:
         return {}
-    ordered, _ = _index_by_urn(positions_section)
-    grouped: dict[str, list[str]] = {}
+    ordered, _ = _index_by_urn(section)
+    names: dict[str, str] = {}
     for entity in ordered:
-        company_urn = entity.get("companyUrn")
-        title = entity.get("title")
-        if company_urn and title:
-            grouped.setdefault(company_urn, []).append(title)
-    return grouped
+        geo_urn = entity.get("geoUrn")
+        name = _clean(entity.get("geoLocationName")) or _clean(entity.get("locationName"))
+        if geo_urn and name:
+            names.setdefault(geo_urn, name)
+    return names
 
 
 def _experience(raw: dict[str, Json]) -> list[ExperienceEntry]:
-    section = raw.get("profilePositionGroups")
-    if not section:
-        return []
-    ordered, _ = _index_by_urn(section)
-    titles_by_company = _titles_by_company(raw.get("profilePositions"))
-    entries = []
-    for entity in ordered:
-        start, end = _date_range(entity)
-        company_urn = entity.get("companyUrn")
-        titles = titles_by_company.get(company_urn) or [None]
-        for title in titles:
-            entries.append(
-                ExperienceEntry(
-                    company=entity.get("companyName", ""),
-                    company_urn=company_urn,
-                    title=title,
-                    start=start,
-                    end=end,
-                )
+    """One entry per *role*, sourced from `profilePositions`.
+
+    Not from `profilePositionGroups`: a group carries a single date range
+    spanning the member's entire tenure at that company, so attaching it to
+    each role reports every role at a multi-role company as having started
+    when the member joined and never ended - four concurrent, still-current
+    Mastercard roles dating from 2010, on a profile where they were actually
+    sequential. Each Position carries its own dateRange, title, description
+    and location.
+
+    The group is still used for two things: filling in a company name or
+    date range an individual position omits, and keeping companies that have
+    no position entity of their own (all that's lost for those is the title).
+    """
+    groups_section = raw.get("profilePositionGroups")
+    group_order: list[Json] = []
+    groups: dict[str, Json] = {}
+    if groups_section:
+        group_order, _ = _index_by_urn(groups_section)
+        for group in group_order:
+            company_urn = group.get("companyUrn")
+            if company_urn:
+                groups.setdefault(company_urn, group)
+
+    positions_section = raw.get("profilePositions")
+    positions: list[Json] = []
+    if positions_section:
+        positions, _ = _index_by_urn(positions_section)
+
+    entries: list[ExperienceEntry] = []
+    covered: set[tuple[str, str]] = set()
+
+    def coverage_key(company_urn: str | None, company: str) -> tuple[str, str] | None:
+        """What identifies a company for dedup purposes.
+
+        Not every company has a companyUrn - self-employed ventures and
+        personal projects have no LinkedIn company page. Keying dedup on the
+        urn alone let those through twice: once from profilePositions with a
+        title, then again from the position-group fallback without one.
+        """
+        if company_urn:
+            return ("urn", company_urn)
+        return ("name", company.casefold()) if company else None
+
+    for position in positions:
+        company_urn = position.get("companyUrn")
+        group = groups.get(company_urn) if company_urn else None
+        company = (
+            _clean(position.get("companyName"))
+            or _clean((group or {}).get("companyName"))
+            or ""
+        )
+        key = coverage_key(company_urn, company)
+        if key is not None:
+            covered.add(key)
+        start, end = _date_range(position)
+        if start is None and end is None and group is not None:
+            start, end = _date_range(group)
+        entries.append(
+            ExperienceEntry(
+                company=company,
+                company_urn=company_urn,
+                title=_clean(position.get("title")),
+                description=_clean(position.get("description")),
+                location=_clean(position.get("geoLocationName"))
+                or _clean(position.get("locationName")),
+                start=start,
+                end=end,
             )
+        )
+
+    for group in group_order:
+        company_urn = group.get("companyUrn")
+        company = _clean(group.get("companyName")) or ""
+        if coverage_key(company_urn, company) in covered:
+            continue
+        start, end = _date_range(group)
+        entries.append(
+            ExperienceEntry(
+                company=company,
+                company_urn=company_urn,
+                start=start,
+                end=end,
+            )
+        )
     return entries
 
 
@@ -121,7 +200,7 @@ def _education(raw: dict[str, Json]) -> list[EducationEntry]:
         start, end = _date_range(entity)
         entries.append(
             EducationEntry(
-                school=entity.get("schoolName", ""),
+                school=_clean(entity.get("schoolName")),
                 school_urn=entity.get("schoolUrn"),
                 degree=entity.get("degreeName"),
                 field_of_study=entity.get("fieldOfStudy"),
@@ -150,7 +229,7 @@ def _certifications(raw: dict[str, Json]) -> list[CertificationEntry]:
         start, _ = _date_range(entity)
         entries.append(
             CertificationEntry(
-                name=entity.get("name", ""),
+                name=_clean(entity.get("name")),
                 authority=entity.get("authority"),
                 url=entity.get("url"),
                 license_number=entity.get("licenseNumber"),
@@ -182,22 +261,36 @@ def denormalize(public_identifier: str, raw: dict[str, Json]) -> tuple[Profile, 
     if profile_entity is None:
         raise ValueError("no Profile entity found in 'profile' section")
 
-    name = f"{profile_entity.get('firstName', '')} {profile_entity.get('lastName', '')}".strip()
+    # `or ''` rather than a .get default: these keys are present-with-null
+    # on some profiles, and .get only substitutes when a key is absent -
+    # the difference between "Satya Nadella" and "None Nadella".
+    name = " ".join(
+        part for part in (
+            _clean(profile_entity.get("firstName")),
+            _clean(profile_entity.get("lastName")),
+        ) if part
+    )
 
     country_code = ((profile_entity.get("location") or {}).get("countryCode"))
-    location = country_code
-    if country_code:
-        limitations.append(
-            "location is a country code only (e.g. 'IN') - LinkedIn no longer "
-            "returns city text on this endpoint; resolving geoLocation.geoUrn "
-            "to a human-readable place needs a separate, undocumented call."
-        )
+    geo_urn = ((profile_entity.get("geoLocation") or {}).get("geoUrn"))
+    location = _geo_names(raw).get(geo_urn) if geo_urn else None
+    if location is None:
+        location = country_code
+        if country_code:
+            limitations.append(
+                "location is a country code only (e.g. 'IN') - LinkedIn's profile "
+                "entity carries just geoLocation.geoUrn plus a country code, and "
+                "this member's geoUrn didn't appear on any of their positions, so "
+                "there was no readable place name to resolve it against without a "
+                "separate, undocumented geo call."
+            )
 
     if not raw.get("profilePositions"):
         limitations.append(
-            "experience entries have no job title - titles live on the "
-            "profilePositions endpoint, which hasn't been captured/wired up "
-            "yet, so only company + dates are populated (see README)."
+            "experience entries have no job title, and each role's dates fall back "
+            "to the company-level tenure span - the profilePositions endpoint "
+            "returned nothing for this profile, so only company + overall dates "
+            "are populated."
         )
 
     profile = Profile(
@@ -216,4 +309,13 @@ def denormalize(public_identifier: str, raw: dict[str, Json]) -> tuple[Profile, 
             background_picture=_best_artifact_url(profile_entity.get("backgroundPicture")),
         ),
     )
+    unnamed = sum(1 for e in profile.education if e.school is None and e.school_urn)
+    if unnamed:
+        limitations.append(
+            f"{unnamed} education entr{'y has' if unnamed == 1 else 'ies have'} no "
+            "school name - LinkedIn returned only a schoolUrn with schoolName null "
+            "and no School entity to resolve it against, the same shape as the "
+            "geoUrn case above. The urn is returned in school_urn."
+        )
+
     return profile, limitations
