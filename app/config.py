@@ -211,6 +211,14 @@ class Settings:
 
     cache_dir: str = _text("CACHE_DIR", ".cache")
 
+    # Where cached profiles live: "auto" (default) uses Upstash when it's
+    # configured and falls back to disk, "disk" and "upstash" force one.
+    # Upstash is strongly preferred for a deployment: Render's free tier
+    # replaces the container on every deploy and after ~15 minutes idle,
+    # taking the disk cache with it, which leaves the TTL and the stale-
+    # serving paths with almost nothing to work on.
+    cache_backend: str = _text("CACHE_BACKEND", "auto").lower()
+
     # Shared daily-quota counter (Upstash Redis REST API). When both are set,
     # local runs and the deployed server draw down the same daily quota
     # against the same LinkedIn account instead of each counting on its own.
@@ -230,6 +238,23 @@ class Settings:
 
     def has_shared_quota_store(self) -> bool:
         return bool(self.upstash_redis_rest_url and self.upstash_redis_rest_token)
+
+    def use_upstash_cache(self) -> bool:
+        if self.cache_backend == "disk":
+            return False
+        if self.cache_backend == "upstash":
+            if not self.has_shared_quota_store():
+                raise ConfigError(
+                    "CACHE_BACKEND=upstash but UPSTASH_REDIS_REST_URL / "
+                    "UPSTASH_REDIS_REST_TOKEN are not both set. Set them, or "
+                    "use CACHE_BACKEND=disk."
+                )
+            return True
+        if self.cache_backend != "auto":
+            raise ConfigError(
+                f"CACHE_BACKEND must be auto, disk or upstash, got {self.cache_backend!r}."
+            )
+        return self.has_shared_quota_store()
 
 
 settings = Settings()

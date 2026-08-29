@@ -15,7 +15,7 @@ from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 
 from app import fields as field_spec
-from app.cache import DiskCache
+from app.cache import DiskCache, UpstashCache
 from app.config import settings
 from app.denormalize import denormalize
 from app.models import Meta, ProfileResponse
@@ -56,6 +56,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         await app.state.http.aclose()
+        await cache.aclose()
 
 app = FastAPI(
     title="LinkedIn Profile API",
@@ -68,7 +69,11 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-cache = DiskCache(settings.cache_dir)
+cache = (
+    UpstashCache(settings.upstash_redis_rest_url, settings.upstash_redis_rest_token)
+    if settings.use_upstash_cache()
+    else DiskCache(settings.cache_dir)
+)
 quota_backend = (
     UpstashQuotaBackend(settings.upstash_redis_rest_url, settings.upstash_redis_rest_token)
     if settings.has_shared_quota_store()
@@ -305,7 +310,7 @@ async def _refresh_in_background(public_id: str, session: tuple[str, str, str]) 
 
         raw, upstream_requests = await _fan_out(session, public_id, FETCHED_SECTIONS)
         profile, limitations = denormalize(public_id, raw)
-        cache.set(public_id, {
+        await cache.set(public_id, {
             "fetched_at": datetime.now(timezone.utc).isoformat(),
             "profile": profile.model_dump(),
             "limitations": limitations,
@@ -335,6 +340,7 @@ async def health() -> dict:
         "ok": True,
         "allow_live": settings.allow_live,
         "shared_quota_store": settings.has_shared_quota_store(),
+        "cache_backend": type(cache).__name__,
         "api_key_required": settings.requires_api_key(),
         "daily_quota": settings.daily_quota,
         "quota_resets_at": rate_limiter.resets_at(),
@@ -434,7 +440,7 @@ async def get_profile(
         # include_expired: an expired entry is not a miss here. Letting it
         # expire silently means the next caller pays the full ~9.5s fan-out
         # for data we already hold a slightly old copy of.
-        entry = cache.get_entry(public_id, include_expired=True)
+        entry = await cache.get_entry(public_id, include_expired=True)
         if entry is not None and entry.age_seconds > cache.ttl_seconds:
             remaining = await _quota_remaining(account_key)
             _set_quota_headers(response, remaining)
@@ -550,7 +556,7 @@ async def get_profile(
         # about *us* (session rejected, throttled, upstream broken), which
         # says nothing about whether the cached copy is still accurate.
         if status != 404:
-            stale = cache.get_entry(public_id, include_expired=True)
+            stale = await cache.get_entry(public_id, include_expired=True)
             if stale is not None:
                 _set_quota_headers(response, remaining)
                 logger.warning(
@@ -611,7 +617,7 @@ async def get_profile(
     # request reads - the caller would get a 200 carrying empty experience and
     # education, indistinguishable from a member who has neither.
     if wanted == field_spec.ALL_FIELDS:
-        cache.set(public_id, {**payload, "profile": profile.model_dump()})
+        await cache.set(public_id, {**payload, "profile": profile.model_dump()})
 
     _set_quota_headers(response, remaining)
     logger.info(

@@ -457,10 +457,39 @@ underneath a foreground fetch would put two interleaved paced sequences on one
 connection, which is the burst signature the pacing exists to avoid. Under
 normal single-caller traffic this never contends.
 
-**On Render's free tier the cache is ephemeral.** The container is replaced on
-every deploy and after ~15 minutes idle, taking `.cache/` with it - so
-staleness rarely gets a chance to matter in the demo deployment. A keep-warm
-ping (or a mounted disk) is what makes this pay off.
+#### Where the cache lives
+
+Two backends behind one interface, chosen by `CACHE_BACKEND` (`auto` by
+default: Upstash when it's configured, disk otherwise) - the same shape as the
+quota counter's in-memory/Upstash split.
+
+| | `DiskCache` | `UpstashCache` |
+|---|---|---|
+| Storage | JSON files under `CACHE_DIR` | The Redis the quota counter already uses |
+| Survives a restart | no | **yes** |
+| Read latency | ~0.2s | ~0.5s (one REST round-trip) |
+| Good for | local development | any real deployment |
+
+Disk was close to decorative on Render's free tier: the container - and its
+filesystem - is replaced on every deploy and after ~15 minutes idle, so
+entries rarely survived long enough for the 24h TTL or the stale-serving paths
+to mean anything. Upstash fixes that at the cost of one REST round-trip, which
+against a ~9.5s live fetch is noise.
+
+**Expiry is decided in application code, never by Redis.** `EXPIRE` *deletes*
+the key when it fires, which would destroy the stale copy at exactly the
+moment stale-while-revalidate and serve-stale-on-failure need it, collapsing
+both features back into a hard 24h cliff. The entry carries its own
+`cached_at` and freshness is computed from that; the Redis TTL is set to seven
+days and exists purely as garbage collection.
+
+Both backends follow the same three rules: writes are atomic (temp file plus
+`os.replace` on disk, `SET` on Redis), a read never raises - anything
+unreadable, malformed or written by an older schema version is a *miss* - and
+a write that fails is logged and swallowed, because the response the caller is
+waiting on is already computed. Upstash reads and writes retry once on a short
+timeout: a false miss costs a full fan-out *and* a unit of daily quota, which
+is the genuinely scarce resource.
 
 Only a **complete** fetch is written to the cache. A narrowed one is missing
 sections, and caching it would let `?fields=name` poison the entry a later
