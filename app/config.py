@@ -79,7 +79,7 @@ def _decode_b64(raw: str) -> str:
     except binascii.Error as exc:
         raise ConfigError(
             "LINKEDIN_FULL_COOKIE_B64 is not valid base64 "
-            f"({exc}). It should be the output of tools/get_session_cookie.js - "
+            f"({exc}). It should be the output of tools/curl_to_env.py - "
             "only A-Z a-z 0-9 + / = characters, and don't drop the trailing '=' "
             "padding. If you meant to paste the raw unencoded cookie, use "
             "LINKEDIN_FULL_COOKIE instead."

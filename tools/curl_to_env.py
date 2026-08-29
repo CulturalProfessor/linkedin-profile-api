@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 r"""Turn a browser's "Copy as cURL" into the .env session line.
 
-Why this rather than tools/get_session_cookie.js: a copied cURL command already
-carries the *complete* Cookie header the browser sent, li_at included. Page JS
-cannot read li_at at all - it's HttpOnly - which is why the console helper has
-to walk you through copying that one value by hand, and that manual step is
-where a stray space or a wrapping quote sneaks in and produces a cookie that
-looks perfectly fine and fails later as an opaque 401.
+Why a copied cURL command rather than reading cookies in the browser: the
+copied command already carries the *complete* Cookie header the browser sent,
+li_at included. Page JS cannot read li_at at all, since it is HttpOnly, so any
+console-based approach has to walk you through copying that one value by hand,
+and that manual step is where a stray space or a wrapping quote sneaks in and
+produces a cookie that looks perfectly fine and fails later as an opaque 401.
 
 Usage:
     # In DevTools -> Network, click any www.linkedin.com request,
