@@ -195,7 +195,10 @@ async def get_profile(
         except VoyagerError as exc:
             status = exc.status_code
             if status == 404:
-                raise HTTPException(status_code=404, detail="profile not found") from exc
+                raise HTTPException(
+                    status_code=404,
+                    detail="profile not found, or not visible to the session in use",
+                ) from exc
             if status in (401, 403):
                 raise HTTPException(status_code=401, detail="session cookie rejected by LinkedIn") from exc
             if status == 302:

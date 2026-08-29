@@ -169,3 +169,30 @@ async def test_delay_is_applied_between_requests_not_once_per_profile(monkeypatc
     # One request to resolve + one per fetched section; a gap between each pair.
     assert len(sleeps) == len(FETCHED_SECTIONS)
     assert all(0.8 <= s <= 2.5 for s in sleeps)
+
+
+@pytest.mark.asyncio
+async def test_unknown_profile_is_404_not_an_auth_error():
+    """LinkedIn answers 403 at the resolve step for an identifier that doesn't
+    exist, and the same session keeps working right afterwards. Reporting that
+    as 401 "session expired - capture a fresh session" sends the caller to
+    re-auth over a cookie that was never the problem."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="")
+
+    async with _client(handler) as client:
+        with pytest.raises(VoyagerError) as exc:
+            await client.fetch_profile("nobody-here")
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_resolve_returning_no_urns_is_also_404():
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"data": {"*elements": []}, "included": []})
+
+    async with _client(handler) as client:
+        with pytest.raises(VoyagerError) as exc:
+            await client.fetch_profile("nobody-here")
+    assert exc.value.status_code == 404

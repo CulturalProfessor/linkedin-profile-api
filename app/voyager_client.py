@@ -247,13 +247,32 @@ class VoyagerClient:
         """Returns {"urn": ..., "profile": <body>, <section>: <body>, ...} -
         the same shape as fixtures/sample_raw.json's per-section "body" values.
         """
-        profile_body = await self._get(
-            PROFILE_RESOLVE_PATH,
-            {"q": "memberIdentity", "memberIdentity": public_identifier},
-        )
+        try:
+            profile_body = await self._get(
+                PROFILE_RESOLVE_PATH,
+                {"q": "memberIdentity", "memberIdentity": public_identifier},
+            )
+        except VoyagerError as exc:
+            if exc.status_code in (403, 404):
+                # At the *resolve* step these mean "no such member", not "this
+                # session is finished" - LinkedIn answers 403 for an identifier
+                # that doesn't exist, and the same session keeps working
+                # immediately afterwards. Reporting it as an auth failure sends
+                # the caller off to recapture a cookie that was never the
+                # problem. (Mid-fan-out the same statuses are treated as session
+                # rejection, since by then the member has already resolved.)
+                raise VoyagerError(
+                    f"profile '{public_identifier}' not found or not visible to this session",
+                    status_code=404,
+                ) from exc
+            raise
+
         urns = profile_body.get("data", {}).get("*elements") or []
         if not urns:
-            raise VoyagerError(f"could not resolve profile '{public_identifier}' to a URN")
+            raise VoyagerError(
+                f"profile '{public_identifier}' not found or not visible to this session",
+                status_code=404,
+            )
         urn = urns[0]
         raw: dict = {"urn": urn, "profile": profile_body}
         for section in FETCHED_SECTIONS:
