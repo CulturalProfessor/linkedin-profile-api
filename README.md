@@ -366,6 +366,16 @@ than a default:
 - **Runs as a non-root user.** Nothing in it needs root, and the process holds
   a LinkedIn session cookie in memory.
 
+The container listens on `$PORT` when the host sets one and 8000 otherwise, so
+it works unchanged on Render, Fly or Cloud Run - all of which inject the port
+and fail the health check if the process binds a different one.
+
+**The deployed service does not use this image.** It runs on Render's native
+Python runtime, configured when the service was created; adding a Dockerfile
+to the repo does not change an existing service's runtime. The image exists to
+make the deployment reproducible somewhere other than Render, and to pin the
+Python version in a second place.
+
 ## Deployment
 
 Any host that runs a standard ASGI app works (Railway, Render, Fly.io).

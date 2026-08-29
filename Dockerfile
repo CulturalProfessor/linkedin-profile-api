@@ -32,4 +32,8 @@ EXPOSE 8000
 # of new connections (measured at about three). Multiple workers reinstate a
 # bug that killed sessions after roughly three requests. If you need
 # throughput here, cache harder rather than adding workers.
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]
+#
+# Shell form so ${PORT} expands at runtime. PaaS hosts (Render, Fly, Cloud
+# Run) inject the port to listen on and fail the health check if the process
+# binds a different one; 8000 is only the local default.
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000} --workers 1"]
