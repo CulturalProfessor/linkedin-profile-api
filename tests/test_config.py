@@ -165,12 +165,14 @@ def test_values_are_stripped(env):
 # --- derived posture ------------------------------------------------------
 
 
-def test_api_key_only_required_when_a_backend_session_exists():
-    """With no backend session there is nothing for a key to protect: every
-    caller brings their own cookie and spends their own account's budget."""
-    assert Settings(api_key="k", full_cookie=None, li_at=None,
-                    jsessionid=None).requires_api_key() is False
+def test_api_key_is_required_whenever_one_is_configured():
+    """It gates use of the deployment, not exposure of an account. Exempting
+    callers who bring their own cookie was a hole: a junk but well-formed
+    x-li-cookie looked like "brought their own" and skipped the check, while
+    the request still went out from this server's IP and connection pool."""
     assert Settings(api_key="k", full_cookie=VALID).requires_api_key() is True
+    assert Settings(api_key="k", full_cookie=None, li_at=None,
+                    jsessionid=None).requires_api_key() is True
     assert Settings(api_key=None, full_cookie=VALID).requires_api_key() is False
 
 

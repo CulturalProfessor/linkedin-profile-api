@@ -82,7 +82,7 @@ quota_backend = (
     if settings.has_shared_quota_store()
     else InMemoryQuotaBackend()
 )
-rate_limiter = RateLimiter(quota_backend, settings.daily_quota)
+rate_limiter = RateLimiter(quota_backend, settings.daily_quota, settings.global_daily_quota)
 
 _PUBLIC_ID_RE = re.compile(r"linkedin\.com/in/([^/?#]+)")
 
@@ -422,7 +422,11 @@ async def get_profile(
     # Does the *caller* have a session of their own? This decides both whether
     # the API key is required and whose quota bucket the call lands in.
     caller_session = _resolve_session(x_li_cookie, x_li_at, x_jsessionid, allow_backend=False)
-    if caller_session is None and settings.requires_api_key():
+    # Checked for every caller, including one who brought their own cookie:
+    # a well-formed but junk x-li-cookie would otherwise skip this entirely and
+    # still spend this server's IP and connection pool. See
+    # Settings.requires_api_key.
+    if settings.requires_api_key():
         if not x_api_key or not _keys_match(x_api_key, settings.api_key):
             logger.warning(
                 "request_id=%s public_id=%s outcome=rejected reason=bad_api_key",
@@ -431,8 +435,7 @@ async def get_profile(
             raise HTTPException(
                 status_code=401,
                 detail=(
-                    "this deployment requires an x-api-key header, or your own "
-                    "LinkedIn session via x-li-cookie"
+                    "this deployment requires an x-api-key header"
                 ),
             )
 

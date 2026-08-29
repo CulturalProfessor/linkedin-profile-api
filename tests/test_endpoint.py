@@ -58,7 +58,7 @@ def api(tmp_path, monkeypatch):
     originals = {
         name: getattr(main.settings, name)
         for name in ("full_cookie", "li_at", "jsessionid", "api_key", "allow_live",
-                     "daily_quota", "min_delay", "max_delay")
+                     "daily_quota", "global_daily_quota", "min_delay", "max_delay")
     }
 
     def configure(**kwargs):
@@ -68,13 +68,15 @@ def api(tmp_path, monkeypatch):
             setattr(main.settings, key, value)
 
     configure(full_cookie=None, li_at=None, jsessionid=None, api_key=None,
-      allow_live=True, daily_quota=10, min_delay=0.0, max_delay=0.0)
+              allow_live=True, daily_quota=10, global_daily_quota=1000,
+              min_delay=0.0, max_delay=0.0)
 
     main._refreshing.clear()
     old_cache, old_backend, old_limiter = main.cache, main.quota_backend, main.rate_limiter
     main.cache = DiskCache(str(tmp_path / "cache"))
     main.quota_backend = InMemoryQuotaBackend()
-    main.rate_limiter = RateLimiter(main.quota_backend, main.settings.daily_quota)
+    main.rate_limiter = RateLimiter(main.quota_backend, main.settings.daily_quota,
+                                    main.settings.global_daily_quota)
 
     class Handle:
         set = staticmethod(configure)
@@ -86,9 +88,10 @@ def api(tmp_path, monkeypatch):
             )
 
         @staticmethod
-        def limit(daily_quota):
-            configure(daily_quota=daily_quota)
-            main.rate_limiter = RateLimiter(main.quota_backend, daily_quota)
+        def limit(daily_quota, global_daily_quota=1000):
+            configure(daily_quota=daily_quota, global_daily_quota=global_daily_quota)
+            main.rate_limiter = RateLimiter(main.quota_backend, daily_quota,
+                                            global_daily_quota)
 
     try:
         with TestClient(main.app) as client:
@@ -226,10 +229,38 @@ def test_api_key_required_when_backend_session_is_configured(api):
     assert _get(api, headers={"x-api-key": "s3cret"}).status_code == 200
 
 
-def test_caller_with_own_session_skips_the_api_key(api):
-    """They are spending their own account's risk budget, not the backend's."""
+def test_caller_with_own_session_still_needs_the_api_key(api):
+    """Bringing your own cookie means your account absorbs the quota. It does
+    not mean you may use someone else's server to reach LinkedIn."""
     api.set(full_cookie="li_at=backend; JSESSIONID=\"ajax:backend\"", api_key="s3cret")
-    assert _get(api).status_code == 200
+    assert _get(api).status_code == 401
+    assert _get(api, headers={"x-li-cookie": CALLER_COOKIE,
+                              "x-api-key": "s3cret"}).status_code == 200
+
+
+def test_junk_cookie_cannot_buy_a_free_pass(api):
+    """The hole this closes: any well-formed cookie made `caller_session`
+    non-None, which used to skip the key check entirely - after which the
+    request still went out over this server's pooled connection and IP."""
+    api.set(full_cookie=CALLER_COOKIE, api_key="s3cret")
+    junk = {"x-li-cookie": 'li_at=garbage; JSESSIONID="garbage"'}
+    assert _get(api, headers=junk).status_code == 401
+
+
+def test_global_ceiling_caps_callers_who_mint_new_buckets(api):
+    """The per-account bucket is derived from the caller's own cookie, so
+    varying it hands out a fresh full quota every request. Without a global
+    figure the daily quota bounds a cooperative caller and nobody else."""
+    api.limit(daily_quota=10, global_daily_quota=2)
+    for i in range(2):
+        cookie = f'li_at=tok{i}; JSESSIONID="ajax:{i}"; bcookie="v=2&{i}"'
+        assert _get(api, headers={"x-li-cookie": cookie},
+                    force_refresh="true").status_code == 200
+
+    third = 'li_at=tok9; JSESSIONID="ajax:9"; bcookie="v=2&9"'
+    resp = _get(api, headers={"x-li-cookie": third}, force_refresh="true")
+    assert resp.status_code == 429
+    assert "deployment's daily ceiling" in resp.json()["detail"]
 
 
 def test_malformed_caller_cookie_does_not_bypass_the_api_key(api):

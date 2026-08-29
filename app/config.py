@@ -212,9 +212,21 @@ class Settings(BaseSettings):
     # cached profiles. Flip this if anything looks wrong in production.
     allow_live: bool = Field(default=True, validation_alias=AliasChoices("allow_live", "ALLOW_LIVE"))
 
-    # Hard ceiling on live fetches per calendar day, across all callers.
+    # Hard ceiling on live fetches per calendar day, per LinkedIn account.
     # Caps account exposure at a number we choose, not one the traffic chooses.
     daily_quota: int = Field(default=150, gt=0, validation_alias=AliasChoices("daily_quota", "DAILY_QUOTA"))
+
+    # Ceiling on live fetches per day across *every* bucket combined.
+    #
+    # daily_quota alone bounds nobody: the bucket is derived from the caller's
+    # own cookie, so a caller who varies it gets a fresh full quota on every
+    # request. That is fine as an account-exposure measure and useless as an
+    # abuse limit, and without this the deployment will happily relay unlimited
+    # traffic to LinkedIn from its own IP and connection pool.
+    global_daily_quota: int = Field(
+        default=400, gt=0,
+        validation_alias=AliasChoices("global_daily_quota", "GLOBAL_DAILY_QUOTA"),
+    )
 
     # Politeness delay bounds (seconds) between live requests. Jittered to avoid
     # the even-interval timing signature that behavioural detection keys on.
@@ -274,11 +286,19 @@ class Settings(BaseSettings):
         return bool(self.upstash_redis_rest_url and self.upstash_redis_rest_token)
 
     def requires_api_key(self) -> bool:
-        """Only meaningful when there is a backend session to protect. With no
-        backend session configured every caller brings their own cookie and
-        spends their own account's risk budget, so there is nothing for a key
-        to guard."""
-        return bool(self.api_key and self.has_backend_session())
+        """True whenever a key is configured, whatever session the caller brings.
+
+        This deliberately does *not* exempt callers who supply their own
+        cookie. That exemption was the reasoning behind the quota buckets -
+        your cookie, your risk budget - and applying it to access control was
+        a mistake: `x-li-cookie: li_at=garbage; JSESSIONID="garbage"` is enough
+        to look like "brought their own session" and skip the check entirely,
+        after which the request still goes out from this server, over this
+        server's pooled connection, from this server's IP. The key gates use of
+        the deployment; the quota gates exposure of an account. They are
+        different questions.
+        """
+        return bool(self.api_key)
 
     def use_upstash_cache(self) -> bool:
         if self.cache_backend == "disk":
