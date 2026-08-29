@@ -289,9 +289,16 @@ class VoyagerClient:
         path = SECTION_PATHS[section]
         return await self._get(path, {"q": "viewee", "profileUrn": profile_urn})
 
-    async def fetch_profile(self, public_identifier: str) -> dict:
+    async def fetch_profile(
+        self, public_identifier: str, sections: tuple[str, ...] = FETCHED_SECTIONS
+    ) -> dict:
         """Returns {"urn": ..., "profile": <body>, <section>: <body>, ...} -
         the same shape as fixtures/sample_raw.json's per-section "body" values.
+
+        `sections` defaults to the full set. Narrowing it is what makes
+        `?fields=` cheap: the resolve call below is unavoidable, but each
+        section skipped is one fewer paced upstream request against the
+        session. Pass a subset of FETCHED_SECTIONS, in its order.
         """
         try:
             profile_body = await self._get(
@@ -321,7 +328,7 @@ class VoyagerClient:
             )
         urn = urns[0]
         raw: dict = {"urn": urn, "profile": profile_body}
-        for section in FETCHED_SECTIONS:
+        for section in sections:
             try:
                 raw[section] = await self.fetch_section(section, urn)
             except VoyagerError as exc:

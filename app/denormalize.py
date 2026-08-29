@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.fields import ALL_FIELDS
 from app.models import (
     CertificationEntry,
     EducationEntry,
@@ -251,10 +252,20 @@ def _languages(raw: dict[str, Json]) -> list[LanguageEntry]:
     ]
 
 
-def denormalize(public_identifier: str, raw: dict[str, Json]) -> tuple[Profile, list[str]]:
+def denormalize(
+    public_identifier: str,
+    raw: dict[str, Json],
+    fields: frozenset[str] | None = None,
+) -> tuple[Profile, list[str]]:
     """raw maps section name (e.g. "profile", "profileEducations") to that
     section's `{"data": ..., "included": ...}` body - i.e. one fixture entry.
+
+    `fields` is the set the caller asked for (None means all). It gates the
+    `limitations` notes: a section that wasn't requested is absent by choice,
+    not degraded, and reporting "experience entries have no job title" to
+    someone who only asked for skills would be actively misleading.
     """
+    wanted = fields if fields is not None else ALL_FIELDS
     limitations: list[str] = []
 
     profile_entity = _extract_profile_entity(raw.get("profile", {}))
@@ -276,7 +287,7 @@ def denormalize(public_identifier: str, raw: dict[str, Json]) -> tuple[Profile, 
     location = _geo_names(raw).get(geo_urn) if geo_urn else None
     if location is None:
         location = country_code
-        if country_code:
+        if country_code and "location" in wanted:
             limitations.append(
                 "location is a country code only (e.g. 'IN') - LinkedIn's profile "
                 "entity carries just geoLocation.geoUrn plus a country code, and "
@@ -285,7 +296,7 @@ def denormalize(public_identifier: str, raw: dict[str, Json]) -> tuple[Profile, 
                 "separate, undocumented geo call."
             )
 
-    if not raw.get("profilePositions"):
+    if "experience" in wanted and not raw.get("profilePositions"):
         limitations.append(
             "experience entries have no job title, and each role's dates fall back "
             "to the company-level tenure span - the profilePositions endpoint "
@@ -310,7 +321,7 @@ def denormalize(public_identifier: str, raw: dict[str, Json]) -> tuple[Profile, 
         ),
     )
     unnamed = sum(1 for e in profile.education if e.school is None and e.school_urn)
-    if unnamed:
+    if unnamed and "education" in wanted:
         limitations.append(
             f"{unnamed} education entr{'y has' if unnamed == 1 else 'ies have'} no "
             "school name - LinkedIn returned only a schoolUrn with schoolName null "

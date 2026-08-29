@@ -11,7 +11,9 @@ from datetime import datetime, timezone
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.responses import JSONResponse
 
+from app import fields as field_spec
 from app.cache import DiskCache
 from app.config import settings
 from app.denormalize import denormalize
@@ -19,6 +21,7 @@ from app.models import Meta, ProfileResponse
 from app.quota import InMemoryQuotaBackend, UpstashQuotaBackend
 from app.rate_limit import QuotaExceeded, RateLimiter
 from app.voyager_client import (
+    FETCHED_SECTIONS,
     VoyagerClient,
     VoyagerError,
     extract_cookie_value,
@@ -186,6 +189,22 @@ async def _quota_remaining(account_key: str | None) -> int | None:
         return None
 
 
+def _render(payload: ProfileResponse, wanted: frozenset[str], response: Response):
+    """Drops unrequested keys from `profile` entirely rather than returning
+    them empty. An absent key says "you didn't ask for this"; `"skills": []`
+    says "this member has no skills" - conflating the two would make a narrow
+    query look like a member with a very sparse profile.
+
+    Returned as a JSONResponse so the headers set on `response` survive: a
+    handler that returns a Response object replaces FastAPI's own, and the
+    rate-limit headers live on the injected one.
+    """
+    data = payload.model_dump()
+    if wanted != field_spec.ALL_FIELDS:
+        data["profile"] = {k: v for k, v in data["profile"].items() if k in wanted}
+    return JSONResponse(data, headers=dict(response.headers))
+
+
 @app.get("/health")
 async def health() -> dict:
     payload = {
@@ -214,6 +233,19 @@ async def get_profile(
     response: Response,
     url: str = Query(..., description="LinkedIn profile URL, e.g. https://www.linkedin.com/in/someone"),
     force_refresh: bool = Query(False, description="Bypass cache and re-fetch live"),
+    fields: str | None = Query(
+        None,
+        description=(
+            "Comma-separated subset of output fields to return, e.g. "
+            "`name,headline` or `experience,education`. Defaults to all of them. "
+            "Narrowing cuts real latency: most fields map to one Voyager section "
+            "each, and sections are fetched one at a time with a pause between, "
+            "so `?fields=name,headline` costs one upstream request (~0.5s) against "
+            "seven (~9.5s) for the full set. public_identifier and name are always "
+            "included - they are free. Valid: "
+            + ", ".join(sorted(field_spec.ALL_FIELDS))
+        ),
+    ),
     x_api_key: str | None = Header(
         default=None,
         description=(
@@ -248,6 +280,11 @@ async def get_profile(
         return int((time.perf_counter() - started) * 1000)
 
     public_id = _extract_public_identifier(url)
+    try:
+        wanted = field_spec.parse(fields)
+    except field_spec.UnknownField as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    sections = field_spec.sections_for(wanted, FETCHED_SECTIONS)
 
     # Does the *caller* have a session of their own? This decides both whether
     # the API key is required and whose quota bucket the call lands in.
@@ -279,18 +316,26 @@ async def get_profile(
                 "upstream_requests=0 cache_age_s=%d quota_remaining=%s",
                 request_id, public_id, elapsed_ms(), entry.age_seconds, remaining,
             )
-            return ProfileResponse(
-                **entry.value,
-                source="cache",
-                meta=Meta(
+            # A cached entry is always complete (see the write below), so it
+            # can serve any field subset - `?fields=name` off a warm cache
+            # costs nothing at all.
+            return _render(
+                ProfileResponse(
+                    **entry.value,
                     source="cache",
-                    fetched_at=entry.value["fetched_at"],
-                    request_id=request_id,
-                    duration_ms=elapsed_ms(),
-                    upstream_requests=0,
-                    cache_age_seconds=entry.age_seconds,
-                    quota_remaining=remaining,
+                    meta=Meta(
+                        source="cache",
+                        fetched_at=entry.value["fetched_at"],
+                        request_id=request_id,
+                        duration_ms=elapsed_ms(),
+                        upstream_requests=0,
+                        cache_age_seconds=entry.age_seconds,
+                        quota_remaining=remaining,
+                        fields=sorted(wanted),
+                    ),
                 ),
+                wanted,
+                response,
             )
 
     # Deliberately above session resolution: with live fetching switched off,
@@ -339,7 +384,7 @@ async def get_profile(
         browser_headers=settings.browser_headers,
     ) as client:
         try:
-            raw = await client.fetch_profile(public_id)
+            raw = await client.fetch_profile(public_id, sections)
         except VoyagerError as exc:
             upstream_requests = client.upstream_requests
             status = exc.status_code
@@ -395,30 +440,41 @@ async def get_profile(
             ) from exc
         upstream_requests = client.upstream_requests
 
-    profile, limitations = denormalize(public_id, raw)
+    profile, limitations = denormalize(public_id, raw, wanted)
     payload = {
         "fetched_at": datetime.now(timezone.utc).isoformat(),
         "profile": profile,
         "limitations": limitations,
     }
-    cache.set(public_id, {**payload, "profile": profile.model_dump()})
+    # Only a complete fetch is cached. A narrowed one is missing sections, and
+    # storing it would let `?fields=name` poison the entry that a later full
+    # request reads - the caller would get a 200 carrying empty experience and
+    # education, indistinguishable from a member who has neither.
+    if wanted == field_spec.ALL_FIELDS:
+        cache.set(public_id, {**payload, "profile": profile.model_dump()})
 
     _set_quota_headers(response, remaining)
     logger.info(
         "request_id=%s public_id=%s outcome=ok source=live duration_ms=%d "
-        "upstream_requests=%d quota_remaining=%s",
+        "upstream_requests=%d quota_remaining=%s fields=%s",
         request_id, public_id, elapsed_ms(), upstream_requests, remaining,
+        "all" if wanted == field_spec.ALL_FIELDS else ",".join(sorted(wanted)),
     )
-    return ProfileResponse(
-        **payload,
-        source="live",
-        meta=Meta(
+    return _render(
+        ProfileResponse(
+            **payload,
             source="live",
-            fetched_at=payload["fetched_at"],
-            request_id=request_id,
-            duration_ms=elapsed_ms(),
-            upstream_requests=upstream_requests,
-            cache_age_seconds=None,
-            quota_remaining=remaining,
+            meta=Meta(
+                source="live",
+                fetched_at=payload["fetched_at"],
+                request_id=request_id,
+                duration_ms=elapsed_ms(),
+                upstream_requests=upstream_requests,
+                cache_age_seconds=None,
+                quota_remaining=remaining,
+                fields=sorted(wanted),
+            ),
         ),
+        wanted,
+        response,
     )

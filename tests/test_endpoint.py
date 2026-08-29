@@ -233,3 +233,99 @@ def test_health_reports_posture(api):
     assert body["ok"] is True
     assert body["api_key_required"] is True
     assert body["daily_quota"] == 10
+
+
+# --- ?fields= -----------------------------------------------------------
+
+
+def test_narrow_fields_costs_one_upstream_request(api):
+    """The whole point: name and headline come off the resolve call, so
+    asking for only those must not pay for six section fetches."""
+    calls = []
+    api.transport(_voyager_handler(calls=calls))
+    body = _get(api, fields="name,headline").json()
+
+    assert len(calls) == 1
+    assert body["meta"]["upstream_requests"] == 1
+    assert body["profile"]["name"]
+    assert "headline" in body["profile"]
+
+
+def test_unrequested_fields_are_absent_not_empty(api):
+    """An absent key means 'you didn't ask'; `"skills": []` would mean 'this
+    member has no skills'. Conflating them makes a narrow query look like a
+    very sparse profile."""
+    body = _get(api, fields="name").json()
+    assert "skills" not in body["profile"]
+    assert "experience" not in body["profile"]
+    # public_identifier and name ride along free on the resolve call.
+    assert body["profile"]["public_identifier"]
+    assert body["meta"]["fields"] == ["name", "public_identifier"]
+
+
+def test_experience_pulls_both_position_sections(api):
+    calls = []
+    api.transport(_voyager_handler(calls=calls))
+    body = _get(api, fields="experience").json()
+    assert len(calls) == 3  # resolve + positionGroups + positions
+    assert body["profile"]["experience"]
+
+
+def test_location_pulls_positions_so_the_city_still_resolves(api):
+    """?fields=location would silently degrade to a country code without the
+    positions response to resolve the geoUrn against."""
+    calls = []
+    api.transport(_voyager_handler(calls=calls))
+    _get(api, fields="location")
+    assert any("profilePositions" in url for url in calls)
+
+
+def test_default_is_every_field(api):
+    body = _get(api).json()
+    assert body["meta"]["upstream_requests"] == 7
+    assert set(body["meta"]["fields"]) == {
+        "public_identifier", "name", "headline", "location", "about",
+        "experience", "education", "skills", "certifications", "languages", "images",
+    }
+
+
+def test_unknown_field_is_400(api):
+    resp = _get(api, fields="name,nonsense")
+    assert resp.status_code == 400
+    assert "nonsense" in resp.json()["detail"]
+
+
+def test_narrow_fetch_does_not_poison_the_cache(api):
+    """A narrowed fetch is missing sections. Caching it would let
+    ?fields=name serve a later full request an entry with empty experience
+    and education - a 200 that looks like a member who has neither."""
+    calls = []
+    api.transport(_voyager_handler(calls=calls))
+    _get(api, fields="name")
+    assert len(calls) == 1
+
+    body = _get(api).json()  # full request must go live, not read that entry
+    assert body["meta"]["source"] == "live"
+    assert body["profile"]["experience"]
+    assert len(calls) == 8
+
+
+def test_narrow_query_is_free_off_a_warm_cache(api):
+    """A cached entry is always complete, so it can serve any subset."""
+    calls = []
+    api.transport(_voyager_handler(calls=calls))
+    _get(api)
+    body = _get(api, fields="name,skills").json()
+
+    assert body["meta"]["source"] == "cache"
+    assert body["meta"]["upstream_requests"] == 0
+    assert len(calls) == 7
+    assert "experience" not in body["profile"]
+
+
+def test_rate_limit_headers_survive_field_narrowing(api):
+    """The pruned response is a hand-built JSONResponse, which replaces the
+    injected one - the headers set on it have to be carried over by hand."""
+    resp = _get(api, fields="name")
+    assert resp.headers["x-ratelimit-remaining"] == "9"
+    assert resp.headers["x-request-id"]

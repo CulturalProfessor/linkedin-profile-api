@@ -357,6 +357,7 @@ documented primary path rather than a fallback.
 |---|---|---|
 | `url` (query) | yes | Full profile URL or bare public identifier |
 | `force_refresh` (query) | no | Bypass cache and re-fetch live |
+| `fields` (query) | no | Comma-separated subset of output fields. Default: all |
 | `x-li-cookie` (header) | no* | **Recommended.** The whole `Cookie` header from a real linkedin.com request |
 | `x-li-at` (header) | no* | Minimal alternative: just the `li_at` cookie |
 | `x-jsessionid` (header) | no* | Paired with `x-li-at` |
@@ -389,6 +390,46 @@ curl -s 'https://<your-deployment>/profile?url=https://www.linkedin.com/in/satya
 A live fetch takes roughly 10-15s: seven upstream Voyager requests with a
 jittered pause between each (see the guardrails above). Cache hits return
 immediately and are marked `"source": "cache"`.
+
+#### Narrowing the response with `fields`
+
+Latency here is almost entirely the paced section fan-out, so the way to make
+a call fast is to make fewer requests. Every output field maps to exactly one
+section, and `?fields=` lets a caller pay only for what they use:
+
+```bash
+curl -s 'https://<your-deployment>/profile?url=<url>&fields=name,headline' | jq
+```
+
+| `fields=` | Upstream requests | Roughly |
+|---|---|---|
+| `name`, `headline`, `about`, `images` (any combination) | 1 | ~0.5s |
+| `location` | 2 | ~1.5s |
+| `education` / `skills` / `certifications` / `languages` (each) | 2 | ~1.5s |
+| `experience` | 3 | ~2.5s |
+| omitted (all fields) | 7 | ~9.5s |
+
+Three details worth knowing:
+
+- **`public_identifier` and `name` are always included.** Both come off the
+  resolve call at no extra cost, and a response you can't tie back to a person
+  isn't much use.
+- **Unrequested fields are absent from the JSON, not empty.** A missing key
+  means "you didn't ask for this"; `"skills": []` means "this member has no
+  skills". Returning `[]` for both would make a narrow query look like a very
+  sparse profile. `meta.fields` lists what the response actually carries.
+- **`location` costs a section**, which is not obvious - it pulls
+  `profilePositions`. The readable city string appears nowhere in the resolve
+  response; the denormalizer recovers it by matching the profile's `geoUrn`
+  against the geoUrn→name pairs the *positions* response carries. Skipping
+  that request would silently degrade `?fields=location` to a country code.
+
+Only a **complete** fetch is written to the cache. A narrowed one is missing
+sections, and caching it would let `?fields=name` poison the entry a later
+full request reads - returning a 200 with empty experience and education,
+indistinguishable from a member who has neither. Reads go the other way
+happily: a cached entry is always complete, so `?fields=name` off a warm cache
+costs nothing at all.
 
 Responses: `200` with the profile JSON, `400` (unparseable URL), `401` (no
 usable session / bad `x-api-key` / session rejected by LinkedIn), `404`
@@ -429,6 +470,7 @@ regardless of which region the service is deployed in.
   "request_id": "01j2f4a9c1b7",
   "duration_ms": 9480,
   "upstream_requests": 7,           // 0 on a cache hit
+  "fields": ["name", "headline"],   // what this response carries
   "cache_age_seconds": null,        // null on a live fetch
   "quota_remaining": 147            // null if the quota store was unreachable
 }

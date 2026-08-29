@@ -85,6 +85,9 @@ class Meta(BaseModel):
     # None on a live fetch (the data is new), otherwise how long the cached
     # copy has been sitting on disk.
     cache_age_seconds: int | None = None
+    # The output fields this response carries. Always present, so a caller
+    # can tell "you didn't ask for experience" from "this member has none".
+    fields: list[str] = []
     # None when the quota store couldn't be consulted, which is deliberately
     # not an error - an Upstash hiccup must not fail a good response.
     quota_remaining: int | None = None
