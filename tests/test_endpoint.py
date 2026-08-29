@@ -8,6 +8,7 @@ singletons built at import, so each test swaps them out and puts them back -
 see the `api` fixture.
 """
 import json
+import time
 from pathlib import Path
 
 import httpx
@@ -68,6 +69,7 @@ def api(tmp_path, monkeypatch):
     configure(full_cookie=None, li_at=None, jsessionid=None, api_key=None,
       allow_live=True, daily_quota=10, min_delay=0.0, max_delay=0.0)
 
+    main._refreshing.clear()
     old_cache, old_backend, old_limiter = main.cache, main.quota_backend, main.rate_limiter
     main.cache = DiskCache(str(tmp_path / "cache"))
     main.quota_backend = InMemoryQuotaBackend()
@@ -93,8 +95,20 @@ def api(tmp_path, monkeypatch):
             Handle.transport(_voyager_handler())
             yield Handle
     finally:
+        main._refreshing.clear()
         main.cache, main.quota_backend, main.rate_limiter = old_cache, old_backend, old_limiter
         configure(**originals)
+
+
+def _drain(seconds=0.2):
+    """Lets the background refresh task actually run.
+
+    The endpoint returns as soon as the stale response is sent - that is the
+    whole point of the feature - leaving the refresh pending. TestClient runs
+    the event loop on its own thread, so a plain sleep here does yield to it.
+    Nothing in production waits for the refresh; the tests have to.
+    """
+    time.sleep(seconds)
 
 
 def _get(api, **kwargs):
@@ -329,3 +343,118 @@ def test_rate_limit_headers_survive_field_narrowing(api):
     resp = _get(api, fields="name")
     assert resp.headers["x-ratelimit-remaining"] == "9"
     assert resp.headers["x-request-id"]
+
+
+# --- stale-while-revalidate, and stale on failure ------------------------
+
+
+def _expire(cache_dir, key="jamie-lin-synthetic", age=48 * 3600):
+    """Ages a cache entry on disk past its TTL, without waiting a day."""
+    import json
+    path = next(p for p in cache_dir.rglob(f"{key}.json"))
+    entry = json.loads(path.read_text())
+    entry["cached_at"] = time.time() - age
+    path.write_text(json.dumps(entry))
+
+
+def test_expired_entry_is_served_immediately_as_stale(api, tmp_path):
+    calls = []
+    api.transport(_voyager_handler(calls=calls))
+    _get(api)
+    _expire(tmp_path)
+
+    body = _get(api).json()
+    assert body["meta"]["source"] == "stale"
+    assert body["meta"]["upstream_requests"] == 0
+    assert body["meta"]["cache_age_seconds"] > 24 * 3600
+    # The caller is never silently handed old data.
+    assert any("expired cache entry" in note for note in body["limitations"])
+
+
+def test_stale_response_triggers_a_background_refresh(api, tmp_path):
+    calls = []
+    api.transport(_voyager_handler(calls=calls))
+    _get(api)
+    _expire(tmp_path)
+    assert len(calls) == 7
+
+    assert _get(api).json()["meta"]["source"] == "stale"
+    _drain()
+    assert len(calls) == 14  # the refresh ran after the response was sent
+
+    # And the refreshed entry is fresh again.
+    assert _get(api).json()["meta"]["source"] == "cache"
+
+
+def test_no_second_refresh_while_one_is_already_in_flight(api, tmp_path):
+    """Ten requests for one stale profile must not launch ten fan-outs - that
+    would be seventy upstream requests to produce one cache entry. Simulated
+    by marking a refresh in flight, because a real one finishes too fast here
+    to overlap with the next request."""
+    calls = []
+    api.transport(_voyager_handler(calls=calls))
+    _get(api)
+    _expire(tmp_path)
+
+    main._refreshing.add("jamie-lin-synthetic")
+    for _ in range(5):
+        assert _get(api).json()["meta"]["source"] == "stale"
+    _drain()
+    assert len(calls) == 7  # no refresh launched on top of the one "running"
+
+
+def test_failed_refresh_keeps_the_stale_entry(api, tmp_path):
+    """Losing good stale data because the refresh of it failed is the one
+    outcome that would make stale-while-revalidate worse than plain expiry."""
+    api.transport(_voyager_handler())
+    _get(api)
+    _expire(tmp_path)
+
+    api.transport(_voyager_handler(section_status=302))  # session dies
+    assert _get(api).json()["meta"]["source"] == "stale"
+    _drain()
+
+    body = _get(api).json()
+    assert body["meta"]["source"] == "stale"
+    assert body["profile"]["name"]  # still there, not evicted
+
+
+def test_dead_session_serves_stale_instead_of_401(api, tmp_path):
+    """A dead session used to 401 even for profiles sitting in cache, which
+    needed no session at all."""
+    api.transport(_voyager_handler())
+    _get(api)
+    _expire(tmp_path, age=0)  # still fresh, but force_refresh will go live
+
+    api.transport(_voyager_handler(section_status=302))
+    resp = _get(api, force_refresh="true")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["meta"]["source"] == "stale"
+    assert any("upstream status 302" in note for note in body["limitations"])
+
+
+def test_upstream_429_serves_stale_when_a_copy_exists(api):
+    api.transport(_voyager_handler())
+    _get(api)
+    api.transport(_voyager_handler(section_status=429, retry_after=60))
+    body = _get(api, force_refresh="true").json()
+    assert body["meta"]["source"] == "stale"
+
+
+def test_404_never_serves_stale(api):
+    """'No such member' may mean the profile was deleted or renamed. Answering
+    that with old data asserts something that is no longer true."""
+    api.transport(_voyager_handler())
+    _get(api)
+    api.transport(_voyager_handler(resolve_status=404))
+    assert _get(api, force_refresh="true").status_code == 404
+
+
+def test_stale_response_can_still_be_narrowed(api, tmp_path):
+    api.transport(_voyager_handler())
+    _get(api)
+    _expire(tmp_path)
+    body = _get(api, fields="name").json()
+    assert body["meta"]["source"] == "stale"
+    assert "experience" not in body["profile"]

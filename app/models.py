@@ -74,7 +74,12 @@ class Meta(BaseModel):
     which also made every latency change unmeasurable from the outside.
     """
 
-    source: str  # "live" | "cache"
+    # "live"  - fetched from LinkedIn just now
+    # "cache" - a cache entry still inside its TTL
+    # "stale" - an expired entry, served rather than making the caller wait
+    #           (a refresh runs in the background) or rather than failing when
+    #           the live fetch broke. `limitations` always says which.
+    source: str
     fetched_at: str
     request_id: str
     duration_ms: int
@@ -98,7 +103,7 @@ class ProfileResponse(BaseModel):
     # were top-level before `meta` existed, and removing them in the same
     # release that adds it would break every existing consumer for no reason.
     # Deprecated - read them from `meta`.
-    source: str  # "live" | "cache"
+    source: str  # "live" | "cache" | "stale"
     fetched_at: str
     meta: Meta
     profile: Profile

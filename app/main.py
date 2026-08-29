@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -76,6 +77,35 @@ quota_backend = (
 rate_limiter = RateLimiter(quota_backend, settings.daily_quota)
 
 _PUBLIC_ID_RE = re.compile(r"linkedin\.com/in/([^/?#]+)")
+
+# Public ids with a background refresh already running. One in-process set is
+# enough at this scale: the deployment runs a single worker (see the README on
+# why more than one breaks sessions), so there is exactly one of these.
+# Without it, ten requests for a stale profile would launch ten identical
+# fan-outs - seventy upstream requests to produce one cache entry.
+_refreshing: set[str] = set()
+
+# Serializes live fan-outs. Until background refresh existed there was only
+# ever one fan-out in flight, because each request awaited its own. A refresh
+# running underneath a foreground fetch would put two interleaved paced
+# sequences on one connection - which is the burst signature the pacing exists
+# to avoid, arrived at from a different direction. Under normal single-caller
+# traffic this never contends.
+_fan_out_lock = asyncio.Lock()
+
+# Notes attached to a response that isn't fresh, so a caller is never silently
+# handed old data.
+_STALE_REFRESHING = (
+    "this response is from an expired cache entry, served immediately rather "
+    "than making you wait for a live fetch; a refresh was started in the "
+    "background and the next request should return fresh data. See "
+    "meta.cache_age_seconds for how old this copy is."
+)
+_STALE_UPSTREAM_FAILED = (
+    "this response is from an expired cache entry: the live fetch failed "
+    "({reason}), so stale data was returned instead of an error. See "
+    "meta.cache_age_seconds for how old this copy is."
+)
 
 
 @app.middleware("http")
@@ -189,6 +219,36 @@ async def _quota_remaining(account_key: str | None) -> int | None:
         return None
 
 
+def _stale_response(
+    entry, public_id: str, wanted, request_id: str, duration_ms: int,
+    remaining: int | None, note: str, response: Response,
+):
+    """Builds a `source: "stale"` response from an expired cache entry. The
+    note goes into `limitations` alongside whatever the original fetch
+    recorded, so a caller reading only that list still learns the data is old.
+    """
+    value = dict(entry.value)
+    value["limitations"] = [*value.get("limitations", []), note]
+    return _render(
+        ProfileResponse(
+            **value,
+            source="stale",
+            meta=Meta(
+                source="stale",
+                fetched_at=value["fetched_at"],
+                request_id=request_id,
+                duration_ms=duration_ms,
+                upstream_requests=0,
+                cache_age_seconds=entry.age_seconds,
+                quota_remaining=remaining,
+                fields=sorted(wanted),
+            ),
+        ),
+        wanted,
+        response,
+    )
+
+
 def _render(payload: ProfileResponse, wanted: frozenset[str], response: Response):
     """Drops unrequested keys from `profile` entirely rather than returning
     them empty. An absent key says "you didn't ask for this"; `"skills": []`
@@ -203,6 +263,70 @@ def _render(payload: ProfileResponse, wanted: frozenset[str], response: Response
     if wanted != field_spec.ALL_FIELDS:
         data["profile"] = {k: v for k, v in data["profile"].items() if k in wanted}
     return JSONResponse(data, headers=dict(response.headers))
+
+
+async def _fan_out(session: tuple[str, str, str], public_id: str, sections: tuple[str, ...]):
+    """One paced Voyager fan-out. Returns (raw, upstream_requests); raises
+    VoyagerError. Held under _fan_out_lock so two of these never interleave."""
+    _, cookie_header, csrf_token = session
+    async with _fan_out_lock:
+        async with VoyagerClient(
+            cookie_header,
+            csrf_token,
+            http_client=app.state.http,
+            min_delay=settings.min_delay,
+            max_delay=settings.max_delay,
+            browser_headers=settings.browser_headers,
+        ) as client:
+            try:
+                return await client.fetch_profile(public_id, sections), client.upstream_requests
+            except VoyagerError as exc:
+                exc.upstream_requests = client.upstream_requests
+                raise
+
+
+async def _refresh_in_background(public_id: str, session: tuple[str, str, str]) -> None:
+    """Re-fetches a stale profile after its stale copy has already been sent.
+
+    Nobody is waiting on this, so its only obligations are to not run twice at
+    once for the same profile, and to never make things worse: a failure here
+    leaves the existing stale entry exactly where it was. Losing good stale
+    data because the refresh of it failed is the one outcome that would make
+    stale-while-revalidate a downgrade on plain expiry.
+    """
+    li_at, cookie_header, _ = session
+    account_key = _account_key(li_at, cookie_header)
+    try:
+        try:
+            await rate_limiter.before_live_fetch(account_key)
+        except QuotaExceeded:
+            logger.info("background refresh of %s skipped: quota exhausted", public_id)
+            return
+
+        raw, upstream_requests = await _fan_out(session, public_id, FETCHED_SECTIONS)
+        profile, limitations = denormalize(public_id, raw)
+        cache.set(public_id, {
+            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "profile": profile.model_dump(),
+            "limitations": limitations,
+        })
+        logger.info(
+            "background refresh of %s ok, upstream_requests=%d", public_id, upstream_requests
+        )
+    except Exception as exc:  # noqa: BLE001 - nothing is awaiting this task
+        logger.warning("background refresh of %s failed, keeping stale entry: %s", public_id, exc)
+    finally:
+        _refreshing.discard(public_id)
+
+
+def _start_refresh(public_id: str, session: tuple[str, str, str] | None) -> bool:
+    """Kicks off a background refresh unless one is already running, live
+    fetching is off, or there is no session to do it with."""
+    if session is None or not settings.allow_live or public_id in _refreshing:
+        return False
+    _refreshing.add(public_id)
+    asyncio.create_task(_refresh_in_background(public_id, session))
+    return True
 
 
 @app.get("/health")
@@ -307,7 +431,25 @@ async def get_profile(
     account_key = _account_key(session[0], session[1]) if session else None
 
     if not force_refresh:
-        entry = cache.get_entry(public_id)
+        # include_expired: an expired entry is not a miss here. Letting it
+        # expire silently means the next caller pays the full ~9.5s fan-out
+        # for data we already hold a slightly old copy of.
+        entry = cache.get_entry(public_id, include_expired=True)
+        if entry is not None and entry.age_seconds > cache.ttl_seconds:
+            remaining = await _quota_remaining(account_key)
+            _set_quota_headers(response, remaining)
+            refreshing = _start_refresh(public_id, session)
+            logger.info(
+                "request_id=%s public_id=%s outcome=ok source=stale duration_ms=%d "
+                "cache_age_s=%d refresh_started=%s",
+                request_id, public_id, elapsed_ms(), entry.age_seconds, refreshing,
+            )
+            return _stale_response(
+                entry, public_id, wanted, request_id, elapsed_ms(), remaining,
+                _STALE_REFRESHING if refreshing
+                else _STALE_UPSTREAM_FAILED.format(reason="no refresh could be started"),
+                response,
+            )
         if entry is not None:
             remaining = await _quota_remaining(account_key)
             _set_quota_headers(response, remaining)
@@ -375,70 +517,88 @@ async def get_profile(
         ) from exc
 
     upstream_requests = 0
-    async with VoyagerClient(
-        cookie_header,
-        csrf_token,
-        http_client=app.state.http,
-        min_delay=settings.min_delay,
-        max_delay=settings.max_delay,
-        browser_headers=settings.browser_headers,
-    ) as client:
-        try:
-            raw = await client.fetch_profile(public_id, sections)
-        except VoyagerError as exc:
-            upstream_requests = client.upstream_requests
-            status = exc.status_code
-            if upstream_requests == 0:
-                # Nothing reached LinkedIn, so nothing was spent on the
-                # account - see RateLimiter.refund. A fetch that did put
-                # traffic on the session is not refunded, however it ended.
-                remaining = await rate_limiter.refund(account_key)
-            logger.warning(
-                "request_id=%s public_id=%s outcome=error source=live status=%s "
-                "upstream_requests=%d duration_ms=%d: %s",
-                request_id, public_id, status, upstream_requests, elapsed_ms(), exc,
-            )
-            quota_headers = {
-                "X-RateLimit-Limit": str(rate_limiter.daily_quota),
-                "X-RateLimit-Remaining": str(remaining),
-                "X-RateLimit-Reset": str(rate_limiter.resets_at()),
-            }
-            if status == 404:
-                raise HTTPException(
-                    status_code=404,
-                    detail="profile not found, or not visible to the session in use",
-                    headers=quota_headers,
-                ) from exc
-            if status == 429:
-                # LinkedIn throttling us is the one upstream status the caller
-                # can act on correctly, and mapping it to a generic 502 threw
-                # that away. Retry-After is LinkedIn's own when it sent one.
-                raise HTTPException(
-                    status_code=429,
-                    detail="LinkedIn is rate-limiting this session - back off and retry later",
-                    headers={**quota_headers, "Retry-After": str(exc.retry_after or 60)},
-                ) from exc
-            if status in (401, 403):
-                raise HTTPException(
-                    status_code=401,
-                    detail="session cookie rejected by LinkedIn",
-                    headers=quota_headers,
-                ) from exc
-            if status == 302:
-                # LinkedIn redirects to the login/authwall page instead of
-                # returning JSON when the session cookie is invalid or
-                # expired - this is an auth problem, not an infra one.
-                raise HTTPException(
-                    status_code=401,
-                    detail="session expired or invalid: LinkedIn redirected to login - capture a fresh session",
-                    headers=quota_headers,
-                ) from exc
+    try:
+        raw, upstream_requests = await _fan_out(session, public_id, sections)
+    except VoyagerError as exc:
+        upstream_requests = getattr(exc, "upstream_requests", 0)
+        status = exc.status_code
+        if upstream_requests == 0:
+            # Nothing reached LinkedIn, so nothing was spent on the
+            # account - see RateLimiter.refund. A fetch that did put
+            # traffic on the session is not refunded, however it ended.
+            remaining = await rate_limiter.refund(account_key)
+        logger.warning(
+            "request_id=%s public_id=%s outcome=error source=live status=%s "
+            "upstream_requests=%d duration_ms=%d: %s",
+            request_id, public_id, status, upstream_requests, elapsed_ms(), exc,
+        )
+        quota_headers = {
+            "X-RateLimit-Limit": str(rate_limiter.daily_quota),
+            "X-RateLimit-Remaining": str(remaining),
+            "X-RateLimit-Reset": str(rate_limiter.resets_at()),
+        }
+
+        # Degrade instead of falling over. A dead session used to turn
+        # every request into a 401 - including requests for profiles
+        # sitting in the cache, which needed no session at all. Serving
+        # the stale copy matters most in exactly the situation the backend
+        # session is least reliable.
+        #
+        # Not for 404, deliberately: "no such member" may mean the profile
+        # was deleted or renamed, and answering that with old data asserts
+        # something that is no longer true. Every other failure here is
+        # about *us* (session rejected, throttled, upstream broken), which
+        # says nothing about whether the cached copy is still accurate.
+        if status != 404:
+            stale = cache.get_entry(public_id, include_expired=True)
+            if stale is not None:
+                _set_quota_headers(response, remaining)
+                logger.warning(
+                    "request_id=%s public_id=%s outcome=degraded source=stale "
+                    "upstream_status=%s cache_age_s=%d",
+                    request_id, public_id, status, stale.age_seconds,
+                )
+                return _stale_response(
+                    stale, public_id, wanted, request_id, elapsed_ms(), remaining,
+                    _STALE_UPSTREAM_FAILED.format(reason=f"upstream status {status}"),
+                    response,
+                )
+
+        if status == 404:
             raise HTTPException(
-                status_code=502,
-                detail=f"upstream error: {exc}",
+                status_code=404,
+                detail="profile not found, or not visible to the session in use",
                 headers=quota_headers,
             ) from exc
-        upstream_requests = client.upstream_requests
+        if status == 429:
+            # LinkedIn throttling us is the one upstream status the caller
+            # can act on correctly, and mapping it to a generic 502 threw
+            # that away. Retry-After is LinkedIn's own when it sent one.
+            raise HTTPException(
+                status_code=429,
+                detail="LinkedIn is rate-limiting this session - back off and retry later",
+                headers={**quota_headers, "Retry-After": str(exc.retry_after or 60)},
+            ) from exc
+        if status in (401, 403):
+            raise HTTPException(
+                status_code=401,
+                detail="session cookie rejected by LinkedIn",
+                headers=quota_headers,
+            ) from exc
+        if status == 302:
+            # LinkedIn redirects to the login/authwall page instead of
+            # returning JSON when the session cookie is invalid or
+            # expired - this is an auth problem, not an infra one.
+            raise HTTPException(
+                status_code=401,
+                detail="session expired or invalid: LinkedIn redirected to login - capture a fresh session",
+                headers=quota_headers,
+            ) from exc
+        raise HTTPException(
+            status_code=502,
+            detail=f"upstream error: {exc}",
+            headers=quota_headers,
+        ) from exc
 
     profile, limitations = denormalize(public_id, raw, wanted)
     payload = {

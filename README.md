@@ -424,6 +424,44 @@ Three details worth knowing:
   against the geoUrn→name pairs the *positions* response carries. Skipping
   that request would silently degrade `?fields=location` to a country code.
 
+#### Staleness: `source: "stale"`
+
+Cache entries expire after 24h, but an expired entry is not thrown away. It
+gets served in two situations, both marked `meta.source: "stale"` with a note
+in `limitations` saying which - a caller is never silently handed old data.
+
+**Expired entry, refresh in the background.** The caller who happens to arrive
+after expiry used to pay the full ~9.5s to re-fetch. Now they get the stale
+copy in ~0.2s and a refresh starts behind the response, so the *next* caller
+gets fresh data. Two things this gets right: only one refresh runs per profile
+at a time (five concurrent requests for one stale profile launch one fan-out,
+not five), and a refresh that fails leaves the stale entry exactly where it
+was - losing good stale data because the refresh of it failed would make this
+worse than plain expiry.
+
+**Live fetch failed, stale copy exists.** A dead session used to turn every
+request into a `401`, including requests for profiles sitting in the cache
+that needed no session at all. Now the stale copy is returned instead, with
+`limitations` naming the upstream status. The API degrades rather than falling
+over, which matters most in exactly the situation the backend session is least
+reliable.
+
+The one exception is `404`: "no such member" may mean the profile was deleted
+or renamed, and answering that with old data would assert something that is no
+longer true. Every other failure is about *us* - session rejected, throttled,
+upstream broken - which says nothing about whether the cached copy is still
+accurate.
+
+Note that live fan-outs are serialized: a background refresh running
+underneath a foreground fetch would put two interleaved paced sequences on one
+connection, which is the burst signature the pacing exists to avoid. Under
+normal single-caller traffic this never contends.
+
+**On Render's free tier the cache is ephemeral.** The container is replaced on
+every deploy and after ~15 minutes idle, taking `.cache/` with it - so
+staleness rarely gets a chance to matter in the demo deployment. A keep-warm
+ping (or a mounted disk) is what makes this pay off.
+
 Only a **complete** fetch is written to the cache. A narrowed one is missing
 sections, and caching it would let `?fields=name` poison the entry a later
 full request reads - returning a 200 with empty experience and education,
@@ -465,7 +503,7 @@ regardless of which region the service is deployed in.
 
 ```jsonc
 "meta": {
-  "source": "live",                 // live | cache
+  "source": "live",                 // live | cache | stale
   "fetched_at": "2026-08-30T…",
   "request_id": "01j2f4a9c1b7",
   "duration_ms": 9480,
