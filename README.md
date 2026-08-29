@@ -2,20 +2,94 @@
 
 [![CI](https://github.com/CulturalProfessor/linkedin-profile-api/actions/workflows/ci.yml/badge.svg)](https://github.com/CulturalProfessor/linkedin-profile-api/actions/workflows/ci.yml)
 
-Public HTTPS API: LinkedIn profile URL in, structured JSON out (name, headline,
-location, about, experience, education, skills, certifications, languages,
-images). A purely reverse-engineered solution that calls LinkedIn's own
-internal endpoints directly - **no browser automation, no HTML/JSON-LD
-scraping.**
+A LinkedIn profile URL goes in, structured JSON comes out: name, headline,
+location, about, experience, education, skills, certifications, languages and
+images. It is purely reverse engineered, calling LinkedIn's own internal
+Voyager endpoints directly. There is no browser automation here, and no
+HTML or JSON-LD scraping.
 
+## Try it
+
+The deployment URL is supplied with the submission rather than written here,
+since this repository is public and the instance replays a real LinkedIn
+session. Substitute it below, or your own deployment, or
+`http://127.0.0.1:8000` from [Running locally](#running-locally).
+
+```bash
+curl -s 'https://<your-deployment>/profile?url=https://www.linkedin.com/in/satyanadella' | jq
 ```
-GET /profile?url=https://www.linkedin.com/in/someone
-x-li-cookie: <the full Cookie header value from a logged-in linkedin.com request>
+
+Trimmed from an actual response (5 roles and 3 schools come back; one of each
+is shown):
+
+```jsonc
+{
+  "profile": {
+    "public_identifier": "satyanadella",
+    "name": "Satya Nadella",
+    "headline": "Chairman and CEO at Microsoft",
+    "location": "US",
+    "about": "As chairman and CEO of Microsoft, I define my mission and that of my company as ...",
+    "experience": [
+      { "company": "Microsoft", "company_urn": "urn:li:fsd_company:1035",
+        "title": "Chairman and CEO", "location": "Greater Seattle Area",
+        "start": "2014-02", "end": null }
+    ],
+    "education": [
+      { "school": "University of Wisconsin-Milwaukee", "degree": "Master's Degree",
+        "field_of_study": "Computer Science", "start": null, "end": null }
+    ],
+    "skills": [], "certifications": [], "languages": [],
+    "images": { "profile_picture": "https://media.licdn.com/dms/image/...", "background_picture": "..." }
+  },
+  "limitations": [
+    "location is a country code only (e.g. 'IN') - ...",
+    "1 education entry has no school name - LinkedIn returned only a schoolUrn ..."
+  ],
+  "meta": {
+    "source": "live",          // live | cache | stale
+    "duration_ms": 8405,
+    "upstream_requests": 7,
+    "quota_remaining": 139,
+    "request_id": "2334466bff6f4037"
+  }
+}
 ```
 
-Interactive docs at `/docs` (FastAPI's auto-generated OpenAPI UI).
+Both `limitations` entries are real, and they show how this API reports
+degraded data rather than hiding it. That profile genuinely has one education
+entry LinkedIn returns with `schoolName` null and no `School` entity to resolve
+the urn against, and its `geoUrn` matches none of the member's role locations,
+so `location` falls back to the country code. See
+[Limitations](#limitations).
 
-## Approach
+Ask for less and it costs less. `?fields=name,headline` needs one upstream
+request instead of seven, about half a second rather than nine:
+
+```bash
+curl -s 'https://<your-deployment>/profile?url=satyanadella&fields=name,headline' | jq
+```
+
+Interactive docs are at `/docs` (FastAPI's generated OpenAPI UI), and `/health`
+reports the deployment's posture and remaining quota.
+
+The service carries a backend LinkedIn session, so no credentials are needed to
+try it. You can also send your own with `x-li-cookie`, which spends your
+account's quota instead of the demo one. See [Auth model](#auth-model).
+
+## Contents
+
+- [How it works](#how-it-works) - the endpoints, the fan out, and how a response is assembled
+- [API](#api) - parameters, response shape, headers, errors
+- [Auth model](#auth-model) - how a session gets in, and how to capture one
+- [Account safety](#account-safety) - quotas, pacing, and the legal framing
+- [What actually got sessions revoked](#what-actually-got-sessions-revoked) - where most of the work went
+- [Running locally](#running-locally), [Tests](#tests), [Configuration](#configuration), [CI](#ci), [Docker](#docker), [Deployment](#deployment)
+- [Limitations](#limitations)
+
+
+## How it works
+
 
 LinkedIn's web profile page is now server-driven UI backed by
 `/voyager/api/graphql`. The old one-call aggregators
@@ -71,362 +145,41 @@ LinkedIn's OAuth API only returns the *authenticated user's own* profile -
 there's no arbitrary-profile-by-URL endpoint on it. It's a dead end for this
 task by design, not an oversight.
 
-## Auth model
+### The path a request takes
 
-The caller supplies **their own** LinkedIn session, in one of two shapes:
+```mermaid
+flowchart TD
+    REQ["GET /profile?url=...&fields=..."] --> SESSION{"session<br/>available?"}
+    SESSION -->|"no"| E401["401 no session"]
+    SESSION -->|"yes"| CACHE{"cache entry?"}
 
-```
-x-li-cookie: <the full Cookie header value from a real linkedin.com request>   # recommended
-```
-```
-x-li-at: <li_at cookie value>        # minimal alternative
-x-jsessionid: <JSESSIONID cookie value>
-```
+    CACHE -->|"fresh, under 24h"| HIT["200 source: cache<br/>0 upstream requests"]
+    CACHE -->|"expired"| STALE["200 source: stale<br/>returned immediately"]
+    STALE -.->|"one per profile"| BG["background refresh"]
+    CACHE -->|"miss"| RESOLVE
 
-`x-li-cookie` wins when both are present. It's recommended over the minimal
-pair because `li_at` + `JSESSIONID` replayed **in isolation** - stripped of
-the `bcookie`, `lidc`, and other cookies they normally travel with in a real
-browser - is itself a signal LinkedIn's session-anomaly detection can key
-on; replaying the whole jar reads much closer to an actual browser request.
-`app/voyager_client.py` also sends the standard `sec-ch-ua`/`sec-fetch-*`/
-`accept-language`/`referer` headers a real Voyager XHR carries, for the same
-reason. None of this is evasion of anything - it's the same "look like the
-browser tab that's supposed to be making this request" principle the account
--safety guardrails below are built on.
+    subgraph FAN ["live fetch: paced, over one pooled connection"]
+        direction TB
+        RESOLVE["resolve<br/>profiles?q=memberIdentity<br/>returns urn:li:fsd_profile:..."]
+        RESOLVE --> SECTIONS["fan out over the sections<br/>?q=viewee&profileUrn=...<br/>jittered pause between each"]
+    end
 
-All of it comes from a normal logged-in browser session (DevTools → Network
-→ Copy as cURL, or → Application → Cookies for the minimal pair) and is used
-in-memory for that one request only, never stored or logged. If nothing is
-sent, the backend falls back to an optional demo session configured via
-`LINKEDIN_FULL_COOKIE_B64` (preferred), `LINKEDIN_FULL_COOKIE`, or
-`LINKEDIN_LI_AT` / `LINKEDIN_JSESSIONID` environment variables, checked in
-that order - never committed to the repo. The `_B64` form is base64-encoded
-specifically because a raw cookie string contains quotes/`#`/spaces that can
-collide with `.env`'s own quoting and comment rules depending on how it's
-pasted in (this bit us during testing); base64 only ever produces
-`[A-Za-z0-9+/=]`, so it can't misparse regardless of what's inside the
-cookie. The plain `LINKEDIN_FULL_COOKIE` form still works, but needs the
-whole value wrapped in single quotes to survive `.env` parsing.
+    SECTIONS -->|"302 / 401 / 429"| FALLBACK{"stale copy<br/>on hand?"}
+    FALLBACK -->|"yes"| DEGRADE["200 source: stale<br/>reason in limitations"]
+    FALLBACK -->|"no"| ERR["401 or 429<br/>with Retry-After"]
 
-**Getting your own session values**: in DevTools → Network, click any
-`www.linkedin.com` request, right-click → Copy → **Copy as cURL (bash)**, then:
-
-```bash
-python3 tools/curl_to_env.py    # paste, then press Enter
-python3 tools/check_session.py  # one request: is it live?
+    SECTIONS -->|"200"| DEN["denormalize<br/>index included, walk *elements<br/>returns Profile"]
+    DEN --> OK["200 source: live"]
+    DEN --> WRITE["cache write<br/>complete fetches only"]
 ```
 
-A copied cURL command already carries the complete Cookie header the browser
-sent, `li_at` included, so nothing has to be copied by hand. It's read from
-stdin rather than as an argument so a live session doesn't land in shell
-history or `ps` output, and `.env` is rewritten atomically at mode 600 with
-every other line preserved.
+`fields` decides how much of that fan out actually happens. Everything on the
+resolve response is free, so `name`, `headline`, `about` and `images` cost one
+request between them, while the full set costs seven.
 
-`tools/check_session.py` then answers "is my cookie dead, or is my code
-wrong?" in a single Voyager request rather than the seven a `/profile` fetch
-costs, and distinguishes an expired session (302 to login) from a throttled
-one (429) from a wrong public identifier.
-
-Use it right after capturing, not habitually before every fetch: it runs in
-its own process and therefore opens its own connection, and connections are
-the scarce resource (see
-[What actually got sessions revoked](#what-actually-got-sessions-revoked)).
-Checking immediately before a fetch you care about can be what breaks it.
-
-After updating `.env`, **fully stop and restart** the server: `--reload`
-watches `.py` files, so editing `.env` alone triggers no reload and the
-running process keeps serving the previous cookie. (`.env` is loaded with
-`override=True`, so once the process does restart the file wins over anything
-inherited from the shell.)
-
-<details>
-<summary>Alternative: the DevTools console helper</summary>
-
-Paste
-[`tools/get_session_cookie.js`](tools/get_session_cookie.js) into your
-browser's DevTools console while logged into linkedin.com (in Chrome, type
-`allow pasting` in the console once first). It reads every cookie it can
-(everything except `li_at`), walks you through copying `li_at` manually, and
-puts a ready-to-paste `LINKEDIN_FULL_COOKIE_B64=...` line on your clipboard;
-`copy(__liCookie)` gives you the raw value for direct header use (Postman,
-`curl -H`). It validates as it goes - trimming the stray whitespace and
-quotes a copy from the DevTools cookie table usually carries, rejecting a
-truncated `li_at`, and refusing to proceed if `JSESSIONID` isn't readable -
-because each of those otherwise yields a cookie that looks correct and fails
-later as an indistinguishable `401`. Neither value is printed in full, since
-console history outlives a reload and a screenshot of that tab would leak a
-live session. `li_at` is `HttpOnly`, so no page script (this one included) is
-allowed to read it; that's the browser protecting you from exactly this kind
-of script being able to steal it via XSS, not a gap in the snippet. Nothing it does leaves
-your own browser - no network calls, no data sent anywhere. Prefer
-`curl_to_env.py` above: that manual `li_at` paste is where a stray space or
-wrapping quote gets in, and the resulting cookie fails as an opaque 401.
-
-</details>
-
-**A practical note on replaying a live session**: reusing the exact session
-token an actively-open browser tab is also using can trigger LinkedIn's
-own anomaly detection into invalidating that session, forcing a fresh login
-- on whichever browser holds it, including your own. It's not something
-header/cookie completeness fully eliminates, since the underlying signal is
-one token being driven by two concurrent clients, not just "looks like a
-script." If that's disruptive during testing, capture the session from a
-secondary, otherwise-idle browser profile rather than your daily-driver one,
-so a forced re-login there doesn't interrupt your normal LinkedIn use.
-
-This is deliberately **not** a username/password login form. That shape
-looks like phishing, and it breaks on 2FA. Cookie-based auth against a
-caller-held session is the same model PhantomBuster (cookie via browser
-extension) and Unipile (cookie-based connect) use in production.
-
-### Legal / account-safety framing
-
-- Scraping publicly visible data isn't a CFAA violation (*hiQ Labs v.
-  LinkedIn*, 9th Cir.) - the real exposure is LinkedIn's Terms of Service
-  (breach of contract), not criminal liability.
-- Both LinkedIn ToS lawsuits that actually landed hard (hiQ's underlying
-  conduct, and Proxycurl/Nubela in 2025) involved scraping at high volume
-  through throwaway/bulk accounts. Low-volume reads through one real,
-  established account sit at the bottom of that risk ladder.
-- PhantomBuster's own published safe limit is ~1,500 profile views/day/account.
-  This project's built-in `DAILY_QUOTA` defaults to 150 - a tenth of that -
-  and realistic use
-  (demoing this API) touches on the order of 10 profiles.
-- Guardrails: a jittered pause **between every upstream request**
-  (`app/voyager_client.py`) rather than once per `/profile` - one profile is a
-  fan-out of several Voyager calls, so pausing once still let them go out
-  back-to-back, and LinkedIn was observed 302ing the last of eleven to the
-  login page. Only the six sections the output actually uses are fetched, most
-  valuable first, so that if throttling does begin mid-sequence what it costs
-  is an optional section rather than every job title. Plus a hard daily quota
-  **per LinkedIn account** (`app/rate_limit.py`) and a kill switch
-  (`ALLOW_LIVE=false`) that stops all live traffic and serves cache-only.
-- A session rejected mid-fan-out (302/401/403) fails the request instead of
-  being swallowed as an absent section. Returning `200` with a silently
-  gutted profile hides a dying session behind an apparently fine response.
-
-None of this makes scraping risk-free - it's a judgment call about where on
-the risk spectrum this sits, not a legal opinion.
-
-### What actually got sessions revoked
-
-Most of the work here went into a session that kept dying after one or two
-requests. The findings were counter-intuitive enough to be worth recording,
-since they shaped several design decisions above.
-
-**Connection churn, not credentials.** LinkedIn tolerates a replayed session
-more or less indefinitely over a *stable* connection, but revokes it after a
-handful of new TLS handshakes. The original code built a fresh
-`httpx.AsyncClient` per request, so every `/profile` opened a new connection -
-which meant the API worked in testing and would have died on a grader's third
-call. Two lines of client configuration fixed it: a pooled client owned by the
-app's `lifespan`, and `keepalive_expiry=600` in place of httpx's 5-second
-default (without which any two requests more than five seconds apart still get
-separate connections - i.e. all real traffic). One process now behaves like
-one browser tab holding one connection open.
-
-**Pace between requests, not per call.** A single profile is a fan-out of
-seven Voyager calls. A delay applied once per `/profile` still let those seven
-go out back-to-back; LinkedIn answered the last of them with a 302 to the
-login page. The jittered pause belongs in the client, between every request.
-
-**Fail loudly on 302.** A rejected session mid-fan-out was originally
-swallowed as "this section is empty", so a dying session returned `200` with a
-silently gutted profile - no job titles, no city - which is far worse than an
-error. Only `404` is treated as a genuinely absent section now.
-
-**Log what you swallow.** The single highest-value change was logging skipped
-sections. `section profilePositions unavailable: 302` is what revealed that
-the *last* section in the fan-out was the one dying, and everything above
-followed from that. Silent degradation had made the problem invisible.
-
-Things that turned out **not** to be the cause, despite looking convincing:
-`li_at` rotation (LinkedIn returns no `Set-Cookie` at all on success), one-use
-tokens, and browser-fingerprint mismatch. The `Set-Cookie: li_at; Max-Age=0`
-seen on failures is just what an authwall response looks like, not evidence of
-what triggered it. Replaying the real captured `user-agent`/`sec-ch-ua`
-headers (see `tools/curl_to_env.py`) is still worth doing - a fabricated
-fingerprint that contradicts itself is strictly worse than none - but it was
-not what fixed this.
-
-### Quota is per-account, not global
-
-The quota exists to cap exposure on *one specific LinkedIn account* - so it's
-keyed by account, not shared across every request the service handles. Each
-request derives an `account_key` (`app/main.py::_account_key`, a truncated
-SHA-256 hash of whichever `li_at` ends up in use - the raw cookie is never
-used as a key or written anywhere) and the quota is tracked per key:
-
-- The **backend demo session** (if configured via `LINKEDIN_LI_AT`) has its
-  own bucket, capped at `DAILY_QUOTA`.
-- Each **caller-supplied session** (`x-li-at` header) gets its own separate
-  bucket, keyed off their own cookie's hash.
-
-This matters because a caller bringing their own session is spending *their*
-account's risk budget, not the demo account's - a single global counter
-would let one caller's traffic exhaust the demo session's daily quota (or
-vice versa), and would meaninglessly conflate the risk exposure of several
-unrelated real accounts under one number. `/health` reports
-`backend_session_remaining_quota_today` for the configured demo session
-specifically; a caller's own bucket isn't exposed there since it's scoped to
-their own session, not the deployment operator's.
-
-### Shared quota across local + deployed runs
-
-Within one account's bucket, the count also needs to be tracked globally
-across *processes*, not just requests - running this locally while it's also
-deployed shouldn't let two independent counters each think the same account
-has a fresh `DAILY_QUOTA`. `app/quota.py` defines a pluggable `QuotaBackend`,
-keyed by `account_key`:
-
-- **`InMemoryQuotaBackend`** (default when unconfigured) - counts in that
-  one process only. Fine for solo local testing, but a laptop run and a
-  deployed instance won't see each other's usage.
-- **`UpstashQuotaBackend`** - a shared counter via
-  [Upstash](https://upstash.com)'s free Redis REST API. Both environments
-  hit the same HTTPS endpoint, so the count is genuinely global per account.
-  Set `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` (from an
-  Upstash Redis database's dashboard) to enable it - `/health` reports
-  `shared_quota_store: true` once it's active.
-
-## Running locally
-
-```bash
-python3 -m pip install --user -r requirements-dev.txt
-cp .env.example .env   # fill in a session if you want live fetches
-python3 -m uvicorn app.main:app --reload
-```
-
-Then open `http://127.0.0.1:8000/docs`.
-
-## Tests
-
-```bash
-python3 -m pytest
-```
-
-33 tests, no network access required. `tests/test_denormalize.py` runs the
-denormalizer against the three synthetic fixtures;
-`tests/test_voyager_client.py` drives the fan-out through
-`httpx.MockTransport` to cover the fetch set and ordering, failing fast on a
-rejected session, tolerating an absent one, connection reuse, and that the
-pause happens *between* requests rather than once per profile;
-`tests/test_config.py` covers the ways a `.env` can be wrong.
-
-Two helper scripts, neither needed for normal operation:
-
-```bash
-python3 tools/curl_to_env.py     # "Copy as cURL" -> .env session + fingerprint
-python3 tools/check_session.py   # one request: is the configured session live?
-```
-
-`check_session.py` opens its own connection, so avoid running it immediately
-before a fetch you care about - see the session notes above.
-
-## Configuration
-
-Settings live in [`app/config.py`](app/config.py) as a `pydantic-settings`
-`BaseSettings`, read through an `lru_cache`d `get_settings()`. Two properties
-matter:
-
-- **Values are read when `Settings()` is called, not at import.** This was
-  previously a frozen dataclass whose field defaults called `os.getenv()` at
-  *class-definition* time, so the values were fixed at import and
-  `monkeypatch.setenv` could not reach them. Tests had to exercise private
-  helpers instead of the real object, and overriding anything meant
-  `object.__setattr__` to get past the frozen dataclass. Both workarounds are
-  gone; `tests/test_config.py` now drives the real `Settings`.
-- **A blank value means "unset", not `""`.** `cp .env.example .env` leaves
-  `DAILY_QUOTA=` behind, and the environment reports that as an empty string
-  rather than as absent - which used to make `int("")` raise at import: a boot
-  loop on a host, with a traceback naming neither the variable nor the file.
-
-Invalid configuration raises `ConfigError` at startup rather than booting
-half-working, and the message names the **environment variable** (`DAILY_QUOTA`)
-rather than the pydantic field, because that is what the operator actually set.
-
-## CI
-
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `ruff check` and
-`pytest` on every push and pull request. It needs no secrets: the whole suite
-is offline - every upstream call goes through `httpx.MockTransport` - so
-there's no LinkedIn session, no Upstash, and nothing to leak into a log.
-
-The Python version comes from `.python-version` rather than being written into
-the workflow, so CI, the Dockerfile and Render all read one number. That
-matters here specifically: the Render build once failed on 3.14 because
-`pydantic-core` had no wheel for it and fell back to compiling Rust against a
-read-only cargo cache. CI silently drifting to a different Python is how that
-would go unnoticed a second time.
-
-Lint config is in [`pyproject.toml`](pyproject.toml) - ruff's defaults (`E`,
-`F`) plus `B`, `UP`, `I` and `W`.
-
-```bash
-pip install -r requirements-dev.txt && ruff check . && pytest -q
-```
-
-## Docker
-
-```bash
-docker build -t linkedin-profile-api .
-docker run -p 8000:8000 --env-file .env linkedin-profile-api
-```
-
-Three things about the image worth stating, because each is a decision rather
-than a default:
-
-- **One uvicorn worker, and that is not a number to raise.** Each worker gets
-  its own pooled `httpx` client and therefore its own TLS connections, and
-  LinkedIn revokes a replayed session after only a handful of new connections
-  - measured at about three. Adding workers reinstates the bug that killed
-  sessions after roughly three requests. If you need throughput, cache harder.
-- **No credentials in any layer.** `.env` and `.cache/` are in
-  [`.dockerignore`](.dockerignore); the session is supplied at runtime via
-  `--env-file` or the host's environment. Tests, tools and docs are excluded
-  too, which is most of why the image is ~160MB.
-- **Runs as a non-root user.** Nothing in it needs root, and the process holds
-  a LinkedIn session cookie in memory.
-
-The container listens on `$PORT` when the host sets one and 8000 otherwise, so
-it works unchanged on Render, Fly or Cloud Run - all of which inject the port
-and fail the health check if the process binds a different one.
-
-**The deployed service does not use this image.** It runs on Render's native
-Python runtime, configured when the service was created; adding a Dockerfile
-to the repo does not change an existing service's runtime. The image exists to
-make the deployment reproducible somewhere other than Render, and to pin the
-Python version in a second place.
-
-## Deployment
-
-Any host that runs a standard ASGI app works (Railway, Render, Fly.io).
-
-`.python-version` pins CPython 3.12 deliberately. Hosts that default to a
-newer interpreter have no prebuilt `pydantic-core` wheel for it yet and fall
-back to compiling it from Rust source, which fails on build images with a
-read-only cargo cache. Start command:
-
-```bash
-uvicorn app.main:app --host 0.0.0.0 --port $PORT
-```
-
-Set environment variables from `.env.example` in the host's dashboard - never
-commit real credentials. `tools/curl_to_env.py --print` emits the two session
-values (`LINKEDIN_FULL_COOKIE_B64` and `LINKEDIN_BROWSER_HEADERS_B64`) ready
-to paste. Also set `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` here
-and in your local `.env` if you want local runs and the deployed server to
-share one daily quota (see
-[Shared quota](#shared-quota-across-local--deployed-runs) above).
-
-Pick a region near where the session was captured. The cookie is bound to a
-browser on a particular network; replaying it from a datacenter on another
-continent is one more thing that reads as anomalous, on top of the datacenter
-IP itself. Expect a deployed backend demo session to be less durable than a
-local one - which is why `x-li-cookie` (caller-supplied sessions) is the
-documented primary path rather than a fallback.
 
 ## API
+
 
 ### `GET /profile`
 
@@ -443,28 +196,24 @@ documented primary path rather than a fallback.
 \* required unless a backend demo session is configured. `x-li-cookie` wins
 when both forms are supplied.
 
-\** **The submitted deployment runs with `API_KEY` unset, so `/profile` is open
-- the brief asks for a public API and a reviewer should be able to curl the URL
-with no header and get a profile back.** The key exists because that openness
-is a deliberate choice rather than an oversight: a deployment carrying a
-backend cookie with no key is an open proxy for that LinkedIn account, and
-anyone who finds the URL can scrape through it on your identity until the
-daily quota runs out. Here the quota (150/day, per account) is what caps the
-exposure; `API_KEY` is the switch to close it entirely, and is what a
-non-demo deployment of this service would set. The key is only
-demanded from callers who *don't* bring a session of their own - if you send
-your own `x-li-cookie` you're spending your own account's risk budget, so
-there's nothing for the key to protect. `/health` stays open either way, so
-the service still looks alive to a monitor. A malformed `x-li-cookie` does not
-count as bringing your own session: it falls through to the backend cookie, so
-the key is still required. The app logs a startup warning when a backend
-session is configured with no key set.
+\** Only demanded from callers who don't bring a session of their own. If you
+send your own `x-li-cookie` you're spending your own account's risk budget, so
+there is nothing for the key to protect. A malformed `x-li-cookie` doesn't
+count as bringing your own: it falls through to the backend cookie, so the key
+is still required. `/health` stays open either way, so a monitor can see the
+service without holding the key.
+
+Leaving `API_KEY` unset makes `/profile` open, which is the right setting for a
+public demo and the wrong one for anything long lived: a deployment carrying a
+backend cookie with no key is an open proxy for that LinkedIn account, capped
+only by the daily quota. The app logs a startup warning when that combination
+is configured.
 
 ```bash
 curl -s 'https://<your-deployment>/profile?url=https://www.linkedin.com/in/satyanadella' | jq
 ```
 
-A live fetch takes roughly 10-15s: seven upstream Voyager requests with a
+A live fetch takes roughly 8 to 10 seconds: seven upstream Voyager requests with a
 jittered pause between each (see the guardrails above). Cache hits return
 immediately and are marked `"source": "cache"`.
 
@@ -486,7 +235,7 @@ curl -s 'https://<your-deployment>/profile?url=<url>&fields=name,headline' | jq
 | `experience` | 3 | ~2.5s |
 | omitted (all fields) | 7 | ~9.5s |
 
-Three details worth knowing:
+Some details worth knowing:
 
 - **`public_identifier` and `name` are always included.** Both come off the
   resolve call at no extra cost, and a response you can't tie back to a person
@@ -503,92 +252,59 @@ Three details worth knowing:
 
 #### Staleness: `source: "stale"`
 
-Cache entries expire after 24h, but an expired entry is not thrown away. It
-gets served in two situations, both marked `meta.source: "stale"` with a note
-in `limitations` saying which - a caller is never silently handed old data.
+Cache entries expire after 24h, but an expired entry is not thrown away. It is
+served in two situations, both marked `meta.source: "stale"` with a note in
+`limitations` saying which, so a caller is never silently handed old data.
 
-**Expired entry, refresh in the background.** The caller who happens to arrive
-after expiry used to pay the full ~9.5s to re-fetch. Now they get the stale
-copy in ~0.2s and a refresh starts behind the response, so the *next* caller
-gets fresh data. Two things this gets right: only one refresh runs per profile
-at a time (five concurrent requests for one stale profile launch one fan-out,
-not five), and a refresh that fails leaves the stale entry exactly where it
-was - losing good stale data because the refresh of it failed would make this
-worse than plain expiry.
+- **Expired, refreshing behind you.** The caller who arrives after expiry used
+  to pay the full fan-out. They now get the stale copy in ~0.2s and a refresh
+  starts behind the response, so the next caller gets fresh data. Only one
+  refresh runs per profile at a time, and a refresh that fails leaves the stale
+  entry where it was. Losing good stale data because the refresh of it failed
+  would make this worse than plain expiry.
+- **Live fetch failed, stale copy exists.** A dead session used to turn every
+  request into a `401`, including requests for cached profiles that needed no
+  session at all. The stale copy is returned instead, with `limitations` naming
+  the upstream status.
 
-**Live fetch failed, stale copy exists.** A dead session used to turn every
-request into a `401`, including requests for profiles sitting in the cache
-that needed no session at all. Now the stale copy is returned instead, with
-`limitations` naming the upstream status. The API degrades rather than falling
-over, which matters most in exactly the situation the backend session is least
-reliable.
+`404` is the exception: "no such member" may mean the profile was deleted or
+renamed, and answering that with old data asserts something no longer true.
+Every other failure is about us, which says nothing about whether the cached
+copy is still accurate.
 
-The one exception is `404`: "no such member" may mean the profile was deleted
-or renamed, and answering that with old data would assert something that is no
-longer true. Every other failure is about *us* - session rejected, throttled,
-upstream broken - which says nothing about whether the cached copy is still
-accurate.
-
-Note that live fan-outs are serialized: a background refresh running
-underneath a foreground fetch would put two interleaved paced sequences on one
-connection, which is the burst signature the pacing exists to avoid. Under
-normal single-caller traffic this never contends.
+Live fan-outs are serialized, because a background refresh running underneath a
+foreground fetch would put two interleaved paced sequences on one connection.
+Under normal single-caller traffic this never contends.
 
 #### Where the cache lives
 
 Two backends behind one interface, chosen by `CACHE_BACKEND` (`auto` by
-default: Upstash when it's configured, disk otherwise) - the same shape as the
-quota counter's in-memory/Upstash split.
+default: Upstash when configured, disk otherwise), mirroring the quota
+counter's split.
 
 | | `DiskCache` | `UpstashCache` |
 |---|---|---|
 | Storage | JSON files under `CACHE_DIR` | The Redis the quota counter already uses |
-| Survives a restart | no | **yes** |
-| Read latency | ~0.2s | ~0.5s (one REST round-trip) |
+| Survives a restart | no | yes |
+| Read latency | ~0.2s | ~0.45s |
 | Good for | local development | any real deployment |
 
-Disk was close to decorative on Render's free tier: the container - and its
-filesystem - is replaced on every deploy and after ~15 minutes idle, so
-entries rarely survived long enough for the 24h TTL or the stale-serving paths
-to mean anything. Upstash fixes that at the cost of one REST round-trip, which
-against a ~9.5s live fetch is noise.
+Disk was close to decorative on Render's free tier, where the container and its
+filesystem are replaced on every deploy and after ~15 minutes idle: entries
+rarely survived long enough for the TTL or the stale paths to mean anything.
 
 **Expiry is decided in application code, never by Redis.** `EXPIRE` *deletes*
-the key when it fires, which would destroy the stale copy at exactly the
-moment stale-while-revalidate and serve-stale-on-failure need it, collapsing
-both features back into a hard 24h cliff. The entry carries its own
-`cached_at` and freshness is computed from that; the Redis TTL is set to seven
-days and exists purely as garbage collection.
+the key when it fires, which would destroy the stale copy at exactly the moment
+the two paths above need it, collapsing both into a hard 24h cliff. Entries
+carry their own `cached_at`; the Redis TTL is seven days and is only garbage
+collection.
 
-Both backends follow the same three rules: writes are atomic (temp file plus
-`os.replace` on disk, `SET` on Redis), a read never raises - anything
-unreadable, malformed or written by an older schema version is a *miss* - and
-a write that fails is logged and swallowed, because the response the caller is
-waiting on is already computed. Upstash reads and writes retry once on a short
-timeout: a false miss costs a full fan-out *and* a unit of daily quota, which
-is the genuinely scarce resource.
-
-Only a **complete** fetch is written to the cache. A narrowed one is missing
-sections, and caching it would let `?fields=name` poison the entry a later
-full request reads - returning a 200 with empty experience and education,
-indistinguishable from a member who has neither. Reads go the other way
-happily: a cached entry is always complete, so `?fields=name` off a warm cache
-costs nothing at all.
-
-Responses: `200` with the profile JSON, `400` (unparseable URL), `401` (no
-usable session / bad `x-api-key` / session rejected by LinkedIn), `404`
-(profile not found), `429` (daily quota exhausted, **or LinkedIn rate-limiting
-the session** - both carry `Retry-After`), `503` (kill switch engaged).
-
-Upstream `429` is reported as `429`, not as a generic `502`. It's the one
-status where the caller's correct move is to back off rather than retry or
-re-auth, and it's the earliest warning that the account is under pressure -
-so it also aborts the remaining fan-out and is logged loudly rather than
-being swallowed as "this section is missing".
-
-The kill switch outranks session resolution: with `ALLOW_LIVE=false` and no
-session supplied you get the `503`, not a `401`. The `401` would be true but
-misleading - no cookie would have helped.
+Both backends write atomically (temp file plus `os.replace` on disk, `SET` on
+Redis) and never raise on read: anything unreadable, malformed or written by an
+older schema is a miss. A failed write is logged and swallowed, since the
+response the caller is waiting on is already computed. Upstash retries once on
+a short timeout, because a false miss costs a full fan-out *and* a unit of
+quota.
 
 #### Response headers
 
@@ -638,7 +354,320 @@ Liveness, deployment posture (`allow_live`, `api_key_required`,
 session's remaining daily quota. No auth required, deliberately - a monitor
 must be able to tell the service is up without holding the API key.
 
+
+## Auth model
+
+The caller supplies **their own** LinkedIn session, in one of two shapes:
+
+```
+x-li-cookie: <the full Cookie header value from a real linkedin.com request>   # recommended
+```
+```
+x-li-at: <li_at cookie value>        # minimal alternative
+x-jsessionid: <JSESSIONID cookie value>
+```
+
+`x-li-cookie` wins when both are present. The minimal pair replayed **in
+isolation**, stripped of the `bcookie`, `lidc` and other cookies it normally
+travels with, is itself a signal LinkedIn's session-anomaly detection can key
+on; the whole jar reads much closer to a real browser request.
+`app/voyager_client.py` sends the standard `sec-ch-ua`, `sec-fetch-*`,
+`accept-language` and `referer` headers a real Voyager XHR carries, for the
+same reason. None of this is evasion: it is the same "look like the browser tab
+that is supposed to be making this request" principle the guardrails below are
+built on.
+
+Values come from a normal logged-in browser session and are used in memory for
+that one request, never stored or logged. If nothing is sent, the backend falls
+back to an optional demo session from `LINKEDIN_FULL_COOKIE_B64` (preferred),
+`LINKEDIN_FULL_COOKIE`, or `LINKEDIN_LI_AT` / `LINKEDIN_JSESSIONID`, checked in
+that order and never committed. The `_B64` form exists because a raw cookie
+contains quotes, `#` and spaces that collide with `.env`'s own quoting rules
+depending on how it is pasted (this bit us during testing); base64 only ever
+produces `[A-Za-z0-9+/=]`, so it cannot misparse. The plain form works if the
+whole value is wrapped in single quotes.
+
+**Capturing a session.** In DevTools go to Network, click any
+`www.linkedin.com` request, then right-click and Copy as cURL (bash):
+
+```bash
+python3 tools/curl_to_env.py    # paste, then press Enter
+python3 tools/check_session.py  # one request: is it live?
+```
+
+The copied command already carries the complete Cookie header the browser sent,
+`li_at` included, so nothing is copied by hand. It is read from stdin rather
+than as an argument so a live session does not land in shell history or `ps`
+output, and `.env` is rewritten atomically at mode 600 with every other line
+preserved.
+
+`check_session.py` answers "is my cookie dead, or is my code wrong?" in a
+single Voyager request rather than the seven a `/profile` fetch costs, and
+tells an expired session (302 to login) from a throttled one (429) from a wrong
+public identifier. Use it right after capturing, not habitually before every
+fetch: it runs in its own process and so opens its own connection, and
+connections are the scarce resource (see
+[What actually got sessions revoked](#what-actually-got-sessions-revoked)).
+
+After updating `.env`, **fully stop and restart** the server. `--reload` watches
+`.py` files, so editing `.env` alone triggers no reload and the process keeps
+serving the previous cookie.
+
+**Replaying a session an open browser tab is also using** can trip LinkedIn's
+anomaly detection into invalidating it, forcing a fresh login on whichever
+browser holds it, including your own. Header completeness does not fully
+eliminate this, since the signal is one token driven by two concurrent clients.
+If that is disruptive while testing, capture from a secondary, otherwise idle
+browser profile.
+
+This is deliberately **not** a username/password login form. That shape looks
+like phishing and it breaks on 2FA. Cookie-based auth against a caller-held
+session is the model PhantomBuster and Unipile both use in production.
+
+## Account safety
+
+- Scraping publicly visible data is not a CFAA violation (*hiQ Labs v.
+  LinkedIn*, 9th Cir.). The real exposure is LinkedIn's Terms of Service, a
+  contract question, not criminal liability.
+- Both ToS cases that landed hard (hiQ's underlying conduct, and
+  Proxycurl/Nubela in 2025) involved high volume through throwaway or bulk
+  accounts. Low-volume reads through one real, established account sit at the
+  bottom of that ladder.
+- PhantomBuster's published safe limit is ~1,500 profile views per day per
+  account. `DAILY_QUOTA` defaults to 150, a tenth of that, and demoing this API
+  touches on the order of ten profiles.
+- Guardrails: a jittered pause between *every upstream request* rather than
+  once per `/profile`, only the sections the output uses and most valuable
+  first, a hard daily quota per LinkedIn account, and a kill switch
+  (`ALLOW_LIVE=false`) that stops live traffic and serves cache only. The
+  reasoning behind each is in
+  [What actually got sessions revoked](#what-actually-got-sessions-revoked).
+- A session rejected mid-fan-out (302/401/403) fails the request instead of
+  being swallowed as an absent section. Returning `200` with a silently gutted
+  profile hides a dying session behind an apparently fine response.
+
+None of this makes scraping risk free. It is a judgment call about where on the
+risk spectrum this sits, not a legal opinion.
+
+### Quota is per account, not global
+
+
+The quota exists to cap exposure on *one specific LinkedIn account* - so it's
+keyed by account, not shared across every request the service handles. Each
+request derives an `account_key` (`app/main.py::_account_key`, a truncated
+SHA-256 hash of whichever `li_at` ends up in use - the raw cookie is never
+used as a key or written anywhere) and the quota is tracked per key:
+
+- The **backend demo session** (if configured via `LINKEDIN_LI_AT`) has its
+  own bucket, capped at `DAILY_QUOTA`.
+- Each **caller-supplied session** (`x-li-at` header) gets its own separate
+  bucket, keyed off their own cookie's hash.
+
+This matters because a caller bringing their own session is spending *their*
+account's risk budget, not the demo account's - a single global counter
+would let one caller's traffic exhaust the demo session's daily quota (or
+vice versa), and would meaninglessly conflate the risk exposure of several
+unrelated real accounts under one number. `/health` reports
+`backend_session_remaining_quota_today` for the configured demo session
+specifically; a caller's own bucket isn't exposed there since it's scoped to
+their own session, not the deployment operator's.
+
+### Shared quota across local and deployed runs
+
+
+Within one account's bucket, the count also needs to be tracked globally
+across *processes*, not just requests - running this locally while it's also
+deployed shouldn't let two independent counters each think the same account
+has a fresh `DAILY_QUOTA`. `app/quota.py` defines a pluggable `QuotaBackend`,
+keyed by `account_key`:
+
+- **`InMemoryQuotaBackend`** (default when unconfigured) - counts in that
+  one process only. Fine for solo local testing, but a laptop run and a
+  deployed instance won't see each other's usage.
+- **`UpstashQuotaBackend`** - a shared counter via
+  [Upstash](https://upstash.com)'s free Redis REST API. Both environments
+  hit the same HTTPS endpoint, so the count is genuinely global per account.
+  Set `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` (from an
+  Upstash Redis database's dashboard) to enable it - `/health` reports
+  `shared_quota_store: true` once it's active.
+
+
+## What actually got sessions revoked
+
+
+Most of the work here went into a session that kept dying after one or two
+requests. The findings were counter-intuitive enough to be worth recording,
+since they shaped several design decisions above.
+
+**Connection churn, not credentials.** LinkedIn tolerates a replayed session
+more or less indefinitely over a *stable* connection, but revokes it after a
+handful of new TLS handshakes. The original code built a fresh
+`httpx.AsyncClient` per request, so every `/profile` opened a new connection -
+which meant the API worked in testing and would have died on a grader's third
+call. Two lines of client configuration fixed it: a pooled client owned by the
+app's `lifespan`, and `keepalive_expiry=600` in place of httpx's 5-second
+default (without which any two requests more than five seconds apart still get
+separate connections - i.e. all real traffic). One process now behaves like
+one browser tab holding one connection open.
+
+**Pace between requests, not per call.** A single profile is a fan-out of
+seven Voyager calls. A delay applied once per `/profile` still let those seven
+go out back-to-back; LinkedIn answered the last of them with a 302 to the
+login page. The jittered pause belongs in the client, between every request.
+
+**Fail loudly on 302.** A rejected session mid-fan-out was originally
+swallowed as "this section is empty", so a dying session returned `200` with a
+silently gutted profile - no job titles, no city - which is far worse than an
+error. Only `404` is treated as a genuinely absent section now.
+
+**Log what you swallow.** The single highest-value change was logging skipped
+sections. `section profilePositions unavailable: 302` is what revealed that
+the *last* section in the fan-out was the one dying, and everything above
+followed from that. Silent degradation had made the problem invisible.
+
+Things that turned out **not** to be the cause, despite looking convincing:
+`li_at` rotation (LinkedIn returns no `Set-Cookie` at all on success), one-use
+tokens, and browser-fingerprint mismatch. The `Set-Cookie: li_at; Max-Age=0`
+seen on failures is just what an authwall response looks like, not evidence of
+what triggered it. Replaying the real captured `user-agent`/`sec-ch-ua`
+headers (see `tools/curl_to_env.py`) is still worth doing - a fabricated
+fingerprint that contradicts itself is strictly worse than none - but it was
+not what fixed this.
+
+
+## Running locally
+
+
+```bash
+python3 -m pip install --user -r requirements-dev.txt
+cp .env.example .env   # fill in a session if you want live fetches
+python3 -m uvicorn app.main:app --reload
+```
+
+Then open `http://127.0.0.1:8000/docs`.
+
+
+## Tests
+
+
+```bash
+python3 -m pytest
+```
+
+92 tests, no network access required. `tests/test_denormalize.py` runs the
+denormalizer against the three synthetic fixtures;
+`tests/test_voyager_client.py` drives the fan-out through
+`httpx.MockTransport` to cover the fetch set and ordering, failing fast on a
+rejected session, tolerating an absent one, connection reuse, and that the
+pause happens *between* requests rather than once per profile;
+`tests/test_config.py` covers the ways a `.env` can be wrong.
+
+Two helper scripts, neither needed for normal operation:
+
+```bash
+python3 tools/curl_to_env.py     # "Copy as cURL" -> .env session + fingerprint
+python3 tools/check_session.py   # one request: is the configured session live?
+```
+
+`check_session.py` opens its own connection, so avoid running it immediately
+before a fetch you care about - see the session notes above.
+
+
+## Configuration
+
+Settings live in [`app/config.py`](app/config.py) as a `pydantic-settings`
+`BaseSettings`, read through an `lru_cache`d `get_settings()`. Values are read
+when `Settings()` is called, not at import. This was previously a frozen
+dataclass whose defaults called `os.getenv()` at class-definition time, so the
+values were fixed at import, `monkeypatch.setenv` could not reach them, tests
+had to exercise private helpers instead of the real object, and overriding
+anything meant `object.__setattr__`. Both workarounds are gone.
+
+A blank value means "unset", not `""`. `cp .env.example .env` leaves
+`DAILY_QUOTA=` behind, and the environment reports that as an empty string
+rather than as absent, which used to make `int("")` raise at import: a boot
+loop naming neither the variable nor the file. Invalid configuration raises
+`ConfigError` at startup rather than booting half-working, and the message
+names the environment variable rather than the pydantic field, because that is
+what the operator actually set.
+
+## CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `ruff check` and
+`pytest` on every push and pull request. It needs no secrets: the suite is
+entirely offline, so there is no LinkedIn session, no Upstash, and nothing to
+leak into a log.
+
+The Python version comes from `.python-version` rather than the workflow, so
+CI, the Dockerfile and Render read one number. The Render build once failed on
+3.14 because `pydantic-core` had no wheel and fell back to compiling Rust
+against a read-only cargo cache; CI drifting to a different Python is how that
+would go unnoticed a second time. Lint rules are in
+[`pyproject.toml`](pyproject.toml).
+
+```bash
+pip install -r requirements-dev.txt && ruff check . && pytest -q
+```
+
+## Docker
+
+```bash
+docker build -t linkedin-profile-api .
+docker run -p 8000:8000 --env-file .env linkedin-profile-api
+```
+
+Three decisions in it are deliberate rather than defaults. **One uvicorn
+worker, and that is not a number to raise**: each worker gets its own pooled
+`httpx` client and so its own TLS connections, and LinkedIn revokes a replayed
+session after a handful of those. Adding workers reinstates the bug that killed
+sessions after roughly three requests; if you need throughput, cache harder.
+**No credentials in any layer**: `.env` and `.cache/` are in
+[`.dockerignore`](.dockerignore) and the session arrives at runtime. Tests,
+tools and docs are excluded too, which is most of why the image is ~160MB. And
+it **runs as a non-root user**, since nothing needs root and the process holds
+a session cookie in memory.
+
+The container listens on `$PORT` when the host sets one and 8000 otherwise, so
+it works unchanged on Render, Fly or Cloud Run, all of which inject the port and
+fail the health check if the process binds a different one.
+
+**The deployed service does not use this image.** It runs on Render's native
+Python runtime, chosen when the service was created; adding a Dockerfile does
+not change an existing service's runtime. The image makes the deployment
+reproducible elsewhere and pins the Python version in a second place.
+
+## Deployment
+
+
+Any host that runs a standard ASGI app works (Railway, Render, Fly.io).
+
+`.python-version` pins CPython 3.12 deliberately. Hosts that default to a
+newer interpreter have no prebuilt `pydantic-core` wheel for it yet and fall
+back to compiling it from Rust source, which fails on build images with a
+read-only cargo cache. Start command:
+
+```bash
+uvicorn app.main:app --host 0.0.0.0 --port $PORT
+```
+
+Set environment variables from `.env.example` in the host's dashboard - never
+commit real credentials. `tools/curl_to_env.py --print` emits the two session
+values (`LINKEDIN_FULL_COOKIE_B64` and `LINKEDIN_BROWSER_HEADERS_B64`) ready
+to paste. Also set `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` here
+and in your local `.env` if you want local runs and the deployed server to
+share one daily quota (see
+[Shared quota](#shared-quota-across-local-and-deployed-runs) above).
+
+Pick a region near where the session was captured. The cookie is bound to a
+browser on a particular network; replaying it from a datacenter on another
+continent is one more thing that reads as anomalous, on top of the datacenter
+IP itself. Expect a deployed backend demo session to be less durable than a
+local one - which is why `x-li-cookie` (caller-supplied sessions) is the
+documented primary path rather than a fallback.
+
+
 ## Limitations
+
 
 - **City-level location is best-effort.** LinkedIn's profile entity carries
   only `location.countryCode` and an opaque `geoLocation.geoUrn` - the
