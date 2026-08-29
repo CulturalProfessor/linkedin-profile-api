@@ -84,7 +84,7 @@ account's quota instead of the demo one. See [Auth model](#auth-model).
 - [Auth model](#auth-model) - how a session gets in, and how to capture one
 - [Account safety](#account-safety) - quotas, pacing, and the legal framing
 - [What actually got sessions revoked](#what-actually-got-sessions-revoked) - where most of the work went
-- [Running locally](#running-locally), [Tests](#tests), [Configuration](#configuration), [CI](#ci), [Docker](#docker), [Deployment](#deployment)
+- [Running locally](#running-locally), [Tests and CI](#tests-and-ci), [Configuration](#configuration), [Deployment](#deployment)
 - [Limitations](#limitations)
 
 
@@ -436,6 +436,17 @@ session is the model PhantomBuster and Unipile both use in production.
 - PhantomBuster's published safe limit is ~1,500 profile views per day per
   account. `DAILY_QUOTA` defaults to 150, a tenth of that, and demoing this API
   touches on the order of ten profiles.
+- Two ceilings, because they answer different questions. `DAILY_QUOTA` is
+  per LinkedIn account and caps exposure on that account. `GLOBAL_DAILY_QUOTA`
+  (400) caps this deployment's total outbound traffic, and exists because the
+  per-account bucket is derived from the caller's own cookie: vary the cookie
+  and you mint a fresh full quota on every request. On its own, `DAILY_QUOTA`
+  bounds a cooperative caller and nobody else.
+- `API_KEY`, when set, is required on `/profile` for **every** caller,
+  including one supplying their own `x-li-cookie`. Bringing your own cookie
+  decides whose quota absorbs the fetch; it does not entitle you to use someone
+  else's server, IP and connection pool to reach LinkedIn. `/health` stays open
+  so a monitor still works.
 - Guardrails: a jittered pause between *every upstream request* rather than
   once per `/profile`, only the sections the output uses and most valuable
   first, a hard daily quota per LinkedIn account, and a kill switch
@@ -537,41 +548,83 @@ not what fixed this.
 
 ## Running locally
 
+Five steps from a clean checkout to a profile in your terminal.
+
+**1. Install.**
 
 ```bash
 python3 -m pip install --user -r requirements-dev.txt
-cp .env.example .env   # fill in a session if you want live fetches
+cp .env.example .env
+```
+
+**2. Copy a session out of your browser.** Log in to linkedin.com, open
+DevTools, go to the Network tab, click any `www.linkedin.com` request, then
+right-click it and choose Copy, then **Copy as cURL (bash)**.
+
+**3. Turn that into `.env`.** Run the script, paste the command at the prompt,
+and press Enter (on Linux and Windows, follow the paste with Ctrl-D):
+
+```bash
+python3 tools/curl_to_env.py
+```
+
+It pulls out the whole Cookie header and the browser's own fingerprint headers,
+base64-encodes both, and writes `LINKEDIN_FULL_COOKIE_B64` and
+`LINKEDIN_BROWSER_HEADERS_B64` into `.env` at mode 600, leaving your other
+settings alone. Nothing is passed as a command-line argument, so the session
+never reaches your shell history or `ps` output.
+
+**4. Check the session is alive** before spending seven requests on a profile:
+
+```bash
+python3 tools/check_session.py
+```
+
+`OK` means it works. Otherwise it tells you whether the cookie expired, whether
+you are being throttled, or whether the identifier was simply wrong. Exit
+status is 0, 1 or 2 respectively.
+
+**5. Run the server and call it.**
+
+```bash
 python3 -m uvicorn app.main:app --reload
 ```
 
-Then open `http://127.0.0.1:8000/docs`.
-
-
-## Tests
-
-
 ```bash
-python3 -m pytest
+curl -s 'http://127.0.0.1:8000/profile?url=https://www.linkedin.com/in/satyanadella' | jq
 ```
 
-92 tests, no network access required. `tests/test_denormalize.py` runs the
-denormalizer against the three synthetic fixtures;
-`tests/test_voyager_client.py` drives the fan-out through
-`httpx.MockTransport` to cover the fetch set and ordering, failing fast on a
-rejected session, tolerating an absent one, connection reuse, and that the
-pause happens *between* requests rather than once per profile;
-`tests/test_config.py` covers the ways a `.env` can be wrong.
+Interactive docs are at `http://127.0.0.1:8000/docs`.
 
-Two helper scripts, neither needed for normal operation:
+Without a session in `.env` the server still runs: it serves anything cached
+and returns `401` for a live fetch, unless the caller supplies their own
+session with `x-li-cookie`. After editing `.env`, stop and restart the server
+fully. `--reload` watches `.py` files, so an `.env` edit alone leaves the old
+cookie in memory.
+
+## Tests and CI
 
 ```bash
-python3 tools/curl_to_env.py     # "Copy as cURL" -> .env session + fingerprint
-python3 tools/check_session.py   # one request: is the configured session live?
+pytest -q          # 94 tests, no network access
+ruff check .
 ```
 
-`check_session.py` opens its own connection, so avoid running it immediately
-before a fetch you care about - see the session notes above.
+Nothing in the suite touches the network. `tests/test_denormalize.py` runs the
+denormalizer against the three synthetic fixtures.
+`tests/test_voyager_client.py` and `tests/test_endpoint.py` drive the fan-out
+and the endpoint through `httpx.MockTransport`, covering the fetch set and its
+ordering, failing fast on a rejected session, tolerating an absent one, the
+cache and stale paths, `?fields=` narrowing, quota exhaustion and the API key.
+`tests/test_cache.py` covers corruption, schema changes and the Upstash
+backend; `tests/test_config.py` the ways a `.env` can be wrong.
 
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs both on every push
+and pull request, and needs no secrets. The Python version comes from
+`.python-version` rather than the workflow, so CI, the Dockerfile and Render
+read one number: the Render build once failed on 3.14 because `pydantic-core`
+had no wheel and fell back to compiling Rust against a read-only cargo cache,
+and CI drifting to a different Python is how that would go unnoticed a second
+time.
 
 ## Configuration
 
@@ -591,80 +644,47 @@ loop naming neither the variable nor the file. Invalid configuration raises
 names the environment variable rather than the pydantic field, because that is
 what the operator actually set.
 
-## CI
+## Deployment
 
-[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `ruff check` and
-`pytest` on every push and pull request. It needs no secrets: the suite is
-entirely offline, so there is no LinkedIn session, no Upstash, and nothing to
-leak into a log.
-
-The Python version comes from `.python-version` rather than the workflow, so
-CI, the Dockerfile and Render read one number. The Render build once failed on
-3.14 because `pydantic-core` had no wheel and fell back to compiling Rust
-against a read-only cargo cache; CI drifting to a different Python is how that
-would go unnoticed a second time. Lint rules are in
-[`pyproject.toml`](pyproject.toml).
+Any host that runs a standard ASGI app works. `.python-version` pins CPython
+3.12 deliberately: hosts defaulting to a newer interpreter have no prebuilt
+`pydantic-core` wheel and fall back to compiling it from Rust source, which
+fails on build images with a read-only cargo cache.
 
 ```bash
-pip install -r requirements-dev.txt && ruff check . && pytest -q
+uvicorn app.main:app --host 0.0.0.0 --port $PORT
 ```
 
-## Docker
+Set the variables from `.env.example` in the host's dashboard, never in the
+repo. `tools/curl_to_env.py --print` emits the two session values ready to
+paste. Set `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` here and
+locally to share one quota counter and one profile cache across both.
+
+Pick a region near where the session was captured. The cookie is bound to a
+browser on a particular network, and replaying it from a datacenter on another
+continent reads as anomalous on top of the datacenter IP itself. Expect a
+deployed backend session to be less durable than a local one, which is why
+`x-li-cookie` is the documented primary path rather than a fallback.
+
+### Docker
 
 ```bash
 docker build -t linkedin-profile-api .
 docker run -p 8000:8000 --env-file .env linkedin-profile-api
 ```
 
-Three decisions in it are deliberate rather than defaults. **One uvicorn
-worker, and that is not a number to raise**: each worker gets its own pooled
-`httpx` client and so its own TLS connections, and LinkedIn revokes a replayed
-session after a handful of those. Adding workers reinstates the bug that killed
-sessions after roughly three requests; if you need throughput, cache harder.
-**No credentials in any layer**: `.env` and `.cache/` are in
-[`.dockerignore`](.dockerignore) and the session arrives at runtime. Tests,
-tools and docs are excluded too, which is most of why the image is ~160MB. And
-it **runs as a non-root user**, since nothing needs root and the process holds
-a session cookie in memory.
+Three things in the image are deliberate. **One uvicorn worker, and that is not
+a number to raise**: each worker gets its own pooled client and so its own TLS
+connections, and adding workers reinstates the churn that killed sessions after
+roughly three requests. **No credentials in any layer**: `.env` and `.cache/`
+are in [`.dockerignore`](.dockerignore) and the session arrives at runtime. And
+it **runs as non-root**, since nothing needs root and the process holds a
+session cookie in memory. The container binds `$PORT` when the host sets one
+and 8000 otherwise.
 
-The container listens on `$PORT` when the host sets one and 8000 otherwise, so
-it works unchanged on Render, Fly or Cloud Run, all of which inject the port and
-fail the health check if the process binds a different one.
-
-**The deployed service does not use this image.** It runs on Render's native
-Python runtime, chosen when the service was created; adding a Dockerfile does
-not change an existing service's runtime. The image makes the deployment
-reproducible elsewhere and pins the Python version in a second place.
-
-## Deployment
-
-
-Any host that runs a standard ASGI app works (Railway, Render, Fly.io).
-
-`.python-version` pins CPython 3.12 deliberately. Hosts that default to a
-newer interpreter have no prebuilt `pydantic-core` wheel for it yet and fall
-back to compiling it from Rust source, which fails on build images with a
-read-only cargo cache. Start command:
-
-```bash
-uvicorn app.main:app --host 0.0.0.0 --port $PORT
-```
-
-Set environment variables from `.env.example` in the host's dashboard - never
-commit real credentials. `tools/curl_to_env.py --print` emits the two session
-values (`LINKEDIN_FULL_COOKIE_B64` and `LINKEDIN_BROWSER_HEADERS_B64`) ready
-to paste. Also set `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` here
-and in your local `.env` if you want local runs and the deployed server to
-share one daily quota (see
-[Shared quota](#shared-quota-across-local-and-deployed-runs) above).
-
-Pick a region near where the session was captured. The cookie is bound to a
-browser on a particular network; replaying it from a datacenter on another
-continent is one more thing that reads as anomalous, on top of the datacenter
-IP itself. Expect a deployed backend demo session to be less durable than a
-local one - which is why `x-li-cookie` (caller-supplied sessions) is the
-documented primary path rather than a fallback.
-
+The deployed service does not use this image; it runs on Render's native Python
+runtime. The image makes the deployment reproducible elsewhere and pins the
+Python version in a second place.
 
 ## Limitations
 
