@@ -187,7 +187,8 @@ extension) and Unipile (cookie-based connect) use in production.
   through throwaway/bulk accounts. Low-volume reads through one real,
   established account sit at the bottom of that risk ladder.
 - PhantomBuster's own published safe limit is ~1,500 profile views/day/account.
-  This project's built-in `DAILY_QUOTA` defaults to 50, and realistic use
+  This project's built-in `DAILY_QUOTA` defaults to 150 - a tenth of that -
+  and realistic use
   (demoing this API) touches on the order of 10 profiles.
 - Guardrails: a jittered pause **between every upstream request**
   (`app/voyager_client.py`) rather than once per `/profile` - one profile is a

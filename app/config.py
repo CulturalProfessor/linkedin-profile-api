@@ -194,14 +194,14 @@ class Settings:
 
     # Hard ceiling on live fetches per calendar day, across all callers.
     # Caps account exposure at a number we choose, not one the traffic chooses.
-    daily_quota: int = _number("DAILY_QUOTA", "50", int)
+    daily_quota: int = _number("DAILY_QUOTA", "150", int)
 
     # Politeness delay bounds (seconds) between live requests. Jittered to avoid
     # the even-interval timing signature that behavioural detection keys on.
-    min_delay: float = _number("MIN_DELAY", "0.8", float)
-    max_delay: float = _number("MAX_DELAY", "2.5", float)
+    min_delay: float = _number("MIN_DELAY", "0.5", float)
+    max_delay: float = _number("MAX_DELAY", "1.5", float)
 
-    cache_dir: str = _text("CACHE_DIR", "fixtures/cache")
+    cache_dir: str = _text("CACHE_DIR", ".cache")
 
     # Shared daily-quota counter (Upstash Redis REST API). When both are set,
     # local runs and the deployed server draw down the same daily quota
