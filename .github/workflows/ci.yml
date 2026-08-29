@@ -1,0 +1,34 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          # Read from .python-version rather than pinned here, so the version
+          # is stated once. The Render build failed on 3.14 because
+          # pydantic-core had no wheel and fell back to compiling Rust against
+          # a read-only cargo cache; CI drifting from the deployment's Python
+          # is exactly how that goes unnoticed a second time.
+          python-version-file: .python-version
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Lint
+        run: ruff check .
+
+      - name: Test
+        # The suite is fully offline - every upstream call goes through
+        # httpx.MockTransport - so CI needs no LinkedIn session, no Upstash,
+        # and no secrets.
+        run: pytest -q

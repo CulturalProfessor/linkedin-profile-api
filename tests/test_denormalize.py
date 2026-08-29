@@ -61,14 +61,14 @@ def test_denormalize_sample_fixture():
     assert cka.issued == "2022-09"
 
     assert len(profile.languages) == 2
-    assert {l.name for l in profile.languages} == {"English", "Mandarin"}
+    assert {lang.name for lang in profile.languages} == {"English", "Mandarin"}
 
     assert profile.images.profile_picture.startswith("https://media.licdn.com/")
     assert profile.images.background_picture.startswith("https://media.licdn.com/")
 
-    assert any("location is a country code only" in l for l in limitations)
+    assert any("location is a country code only" in note for note in limitations)
     # profilePositions is present here, so the title-missing limitation shouldn't fire.
-    assert not any("no job title" in l for l in limitations)
+    assert not any("no job title" in note for note in limitations)
 
 
 def test_denormalize_notable_fixture_handles_missing_sections():
@@ -101,7 +101,7 @@ def test_denormalize_notable_fixture_handles_missing_sections():
     assert profile.images.profile_picture is None
     assert profile.images.background_picture is None
 
-    assert any("no job title" in l for l in limitations)
+    assert any("no job title" in note for note in limitations)
 
 
 def test_multiple_roles_at_one_company_keep_their_own_dates():
@@ -150,7 +150,7 @@ def test_city_resolved_from_matching_position_geo_urn():
     profile, limitations = denormalize("ava-reyes-synthetic", raw)
 
     assert profile.location == "Denver Metropolitan Area"
-    assert not any("country code only" in l for l in limitations)
+    assert not any("country code only" in note for note in limitations)
 
 
 def test_city_falls_back_to_country_code_when_geo_urn_unmatched():
@@ -160,7 +160,7 @@ def test_city_falls_back_to_country_code_when_geo_urn_unmatched():
     profile, limitations = denormalize("jamie-lin-dev", raw)
 
     assert profile.location == "CA"
-    assert any("country code only" in l for l in limitations)
+    assert any("country code only" in note for note in limitations)
 
 
 def test_company_without_urn_is_not_duplicated():
@@ -237,4 +237,4 @@ def test_null_names_do_not_crash_and_are_reported():
     unnamed = next(e for e in profile.education if e.school is None)
     assert unnamed.school_urn == "urn:li:fsd_school:18315"
     assert profile.certifications[0].name is None
-    assert any("no school name" in l for l in limitations)
+    assert any("no school name" in note for note in limitations)

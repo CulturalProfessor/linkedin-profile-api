@@ -117,8 +117,10 @@ class CacheBackend(abc.ABC):
         entry = await self.get_entry(key)
         return entry.value if entry else None
 
-    async def aclose(self) -> None:
-        pass
+    async def aclose(self) -> None:  # noqa: B027 - optional hook, not abstract
+        """Releases any connection the backend holds. A no-op by default:
+        DiskCache has nothing to close, and forcing every backend to
+        implement an empty method would be noise."""
 
 
 class DiskCache(CacheBackend):

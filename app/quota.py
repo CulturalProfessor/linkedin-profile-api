@@ -15,7 +15,7 @@ any of them individually.
 from __future__ import annotations
 
 import abc
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import httpx
 
@@ -29,14 +29,14 @@ def utc_today() -> date:
     One of the two had to move, and UTC is the one that stays true when the
     service is redeployed to a different region.
     """
-    return datetime.now(timezone.utc).date()
+    return datetime.now(UTC).date()
 
 
 def next_utc_midnight() -> int:
     """Unix timestamp of the instant the quota day rolls over - the value
     X-RateLimit-Reset carries."""
-    tomorrow = datetime.now(timezone.utc).date() + timedelta(days=1)
-    return int(datetime(tomorrow.year, tomorrow.month, tomorrow.day, tzinfo=timezone.utc).timestamp())
+    tomorrow = datetime.now(UTC).date() + timedelta(days=1)
+    return int(datetime(tomorrow.year, tomorrow.month, tomorrow.day, tzinfo=UTC).timestamp())
 
 
 class QuotaBackend(abc.ABC):

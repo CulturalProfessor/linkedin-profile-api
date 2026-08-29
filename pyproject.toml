@@ -1,0 +1,19 @@
+[tool.ruff]
+# Matches .python-version and the Dockerfile. Pinned in a third place on
+# purpose: the Render build failed once on 3.14 because pydantic-core had no
+# wheel, and every place the version is stated is a place that failure could
+# have been caught earlier.
+target-version = "py312"
+line-length = 110
+
+[tool.ruff.lint]
+# E/F are ruff's defaults (pycodestyle errors, pyflakes). The rest are the
+# ones that would actually have caught bugs in this codebase's history:
+# B for mutable defaults and except-blind mistakes, UP for stale typing
+# idioms, I for import order.
+select = ["E", "F", "B", "UP", "I", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests reach into module globals deliberately (see tests/test_endpoint.py's
+# `api` fixture) and read private helpers.
+"tests/*" = ["E501"]

@@ -1,0 +1,15 @@
+# Never let a real session cookie into an image layer.
+.env
+.cache/
+fixtures/cache/
+
+.git/
+.github/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+tests/
+tools/
+*.md

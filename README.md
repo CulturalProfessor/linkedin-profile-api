@@ -1,5 +1,7 @@
 # LinkedIn Profile API
 
+[![CI](https://github.com/CulturalProfessor/linkedin-profile-api/actions/workflows/ci.yml/badge.svg)](https://github.com/CulturalProfessor/linkedin-profile-api/actions/workflows/ci.yml)
+
 Public HTTPS API: LinkedIn profile URL in, structured JSON out (name, headline,
 location, about, experience, education, skills, certifications, languages,
 images). A purely reverse-engineered solution that calls LinkedIn's own
@@ -320,6 +322,49 @@ python3 tools/check_session.py   # one request: is the configured session live?
 
 `check_session.py` opens its own connection, so avoid running it immediately
 before a fetch you care about - see the session notes above.
+
+## CI
+
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) runs `ruff check` and
+`pytest` on every push and pull request. It needs no secrets: the whole suite
+is offline - every upstream call goes through `httpx.MockTransport` - so
+there's no LinkedIn session, no Upstash, and nothing to leak into a log.
+
+The Python version comes from `.python-version` rather than being written into
+the workflow, so CI, the Dockerfile and Render all read one number. That
+matters here specifically: the Render build once failed on 3.14 because
+`pydantic-core` had no wheel for it and fell back to compiling Rust against a
+read-only cargo cache. CI silently drifting to a different Python is how that
+would go unnoticed a second time.
+
+Lint config is in [`pyproject.toml`](pyproject.toml) - ruff's defaults (`E`,
+`F`) plus `B`, `UP`, `I` and `W`.
+
+```bash
+pip install -r requirements-dev.txt && ruff check . && pytest -q
+```
+
+## Docker
+
+```bash
+docker build -t linkedin-profile-api .
+docker run -p 8000:8000 --env-file .env linkedin-profile-api
+```
+
+Three things about the image worth stating, because each is a decision rather
+than a default:
+
+- **One uvicorn worker, and that is not a number to raise.** Each worker gets
+  its own pooled `httpx` client and therefore its own TLS connections, and
+  LinkedIn revokes a replayed session after only a handful of new connections
+  - measured at about three. Adding workers reinstates the bug that killed
+  sessions after roughly three requests. If you need throughput, cache harder.
+- **No credentials in any layer.** `.env` and `.cache/` are in
+  [`.dockerignore`](.dockerignore); the session is supplied at runtime via
+  `--env-file` or the host's environment. Tests, tools and docs are excluded
+  too, which is most of why the image is ~160MB.
+- **Runs as a non-root user.** Nothing in it needs root, and the process holds
+  a LinkedIn session cookie in memory.
 
 ## Deployment
 

@@ -349,7 +349,7 @@ class VoyagerClient:
                 continue
         return raw
 
-    async def __aenter__(self) -> "VoyagerClient":
+    async def __aenter__(self) -> VoyagerClient:
         return self
 
     async def __aexit__(self, *exc: object) -> None:

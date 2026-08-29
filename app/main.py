@@ -7,9 +7,8 @@ import logging
 import re
 import time
 import uuid
-from datetime import datetime, timezone
-
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
@@ -311,7 +310,7 @@ async def _refresh_in_background(public_id: str, session: tuple[str, str, str]) 
         raw, upstream_requests = await _fan_out(session, public_id, FETCHED_SECTIONS)
         profile, limitations = denormalize(public_id, raw)
         await cache.set(public_id, {
-            "fetched_at": datetime.now(timezone.utc).isoformat(),
+            "fetched_at": datetime.now(UTC).isoformat(),
             "profile": profile.model_dump(),
             "limitations": limitations,
         })
@@ -608,7 +607,7 @@ async def get_profile(
 
     profile, limitations = denormalize(public_id, raw, wanted)
     payload = {
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "fetched_at": datetime.now(UTC).isoformat(),
         "profile": profile,
         "limitations": limitations,
     }
