@@ -73,6 +73,12 @@ FETCHED_SECTIONS = (
 # to "this member has no such section".
 _SESSION_REJECTED = frozenset({302, 401, 403})
 
+# Statuses that must abort the fan-out immediately rather than being treated as
+# "this member has no such section". 429 joins the rejection statuses here:
+# continuing to fire the remaining sections into a rate limit is the surest way
+# to turn throttling into revocation.
+_FAN_OUT_FATAL = _SESSION_REJECTED | {429}
+
 # Static browser-shaped headers a real Voyager XHR always carries, captured
 # from a live profile-page request. Values here are generic/current-Chrome
 # defaults, not tied to any one person's device - the point is presence
@@ -103,6 +109,18 @@ _BROWSER_HEADERS = {
         "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
     ),
 }
+
+
+def _parse_retry_after(raw: str | None) -> int | None:
+    """LinkedIn sends Retry-After as delta-seconds when it sends one at all.
+    The HTTP-date form is legal too but not produced here, so an unparseable
+    value is reported as absent rather than guessed at."""
+    if not raw:
+        return None
+    try:
+        return max(0, int(raw.strip()))
+    except ValueError:
+        return None
 
 
 def extract_cookie_value(cookie_header: str, name: str) -> str | None:
@@ -149,9 +167,13 @@ def new_http_client(timeout: float = 15.0) -> httpx.AsyncClient:
 
 
 class VoyagerError(RuntimeError):
-    def __init__(self, message: str, status_code: int | None = None):
+    def __init__(self, message: str, status_code: int | None = None, retry_after: int | None = None):
         super().__init__(message)
         self.status_code = status_code
+        # Only ever set for a 429, from LinkedIn's own Retry-After when it
+        # sends one. Passed through to the caller rather than invented here:
+        # the upstream knows how long it wants to be left alone.
+        self.retry_after = retry_after
 
 
 class VoyagerClient:
@@ -183,6 +205,11 @@ class VoyagerClient:
         self._min_delay = min_delay
         self._max_delay = max_delay
         self._sent_first_request = False
+        # Counts requests *issued*, not requests that succeeded. This is the
+        # number that measures account exposure (and the one reported as
+        # meta.upstream_requests): a request that went out and came back 429
+        # cost the session just as much as one that came back 200.
+        self.upstream_requests = 0
         self._owns_client = http_client is None
         self._client = http_client or new_http_client(timeout)
         self._headers = {
@@ -216,6 +243,7 @@ class VoyagerClient:
             await asyncio.sleep(random.uniform(self._min_delay, self._max_delay))
         self._sent_first_request = True
 
+        self.upstream_requests += 1
         resp = await self._client.get(path, params=params, headers=self._headers)
 
         # LinkedIn revokes a session by returning Set-Cookie for li_at with
@@ -231,6 +259,24 @@ class VoyagerClient:
                     path,
                 )
                 break
+
+        if resp.status_code == 429:
+            # The single most important upstream status to surface faithfully:
+            # it is the earliest signal the account is under pressure, and the
+            # only one where the caller's correct response is to back off
+            # rather than retry or re-auth.
+            retry_after = _parse_retry_after(resp.headers.get("retry-after"))
+            logger.warning(
+                "LinkedIn rate-limited this session on %s (429, retry-after=%s) - "
+                "back off now; continuing to push risks the session being revoked",
+                path,
+                retry_after,
+            )
+            raise VoyagerError(
+                f"Voyager request to {path} was rate-limited (429)",
+                status_code=429,
+                retry_after=retry_after,
+            )
 
         if resp.status_code != 200:
             raise VoyagerError(
@@ -279,7 +325,7 @@ class VoyagerClient:
             try:
                 raw[section] = await self.fetch_section(section, urn)
             except VoyagerError as exc:
-                if exc.status_code in _SESSION_REJECTED:
+                if exc.status_code in _FAN_OUT_FATAL:
                     # Not an absent section - the session is being rejected or
                     # challenged mid-sequence. Swallowing this returns a 200
                     # carrying a silently degraded profile (no titles, no city)

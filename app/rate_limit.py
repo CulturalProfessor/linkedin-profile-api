@@ -12,11 +12,15 @@ themselves go out back-to-back; the delay has to sit at the layer that
 actually issues them."""
 from __future__ import annotations
 
-from app.quota import QuotaBackend
+import time
+
+from app.quota import QuotaBackend, next_utc_midnight
 
 
 class QuotaExceeded(RuntimeError):
-    pass
+    def __init__(self, message: str, retry_after: int):
+        super().__init__(message)
+        self.retry_after = retry_after
 
 
 class RateLimiter:
@@ -24,10 +28,41 @@ class RateLimiter:
         self._backend = backend
         self._daily_quota = daily_quota
 
-    async def remaining_today(self, account_key: str) -> int:
-        return max(0, self._daily_quota - await self._backend.current(account_key))
+    @property
+    def daily_quota(self) -> int:
+        return self._daily_quota
 
-    async def before_live_fetch(self, account_key: str) -> None:
+    @staticmethod
+    def resets_at() -> int:
+        """Unix timestamp the counter rolls over at - X-RateLimit-Reset."""
+        return next_utc_midnight()
+
+    def _remaining(self, count: int) -> int:
+        return max(0, self._daily_quota - count)
+
+    async def remaining_today(self, account_key: str) -> int:
+        return self._remaining(await self._backend.current(account_key))
+
+    async def before_live_fetch(self, account_key: str) -> int:
+        """Counts one live fetch and returns the quota remaining afterwards,
+        so the caller can emit rate-limit headers without a second round-trip
+        to the shared store."""
         count = await self._backend.increment_and_check(account_key)
         if count > self._daily_quota:
-            raise QuotaExceeded(f"daily quota of {self._daily_quota} live fetches reached for this session")
+            raise QuotaExceeded(
+                f"daily quota of {self._daily_quota} live fetches reached for this session",
+                retry_after=max(1, next_utc_midnight() - int(time.time())),
+            )
+        return self._remaining(count)
+
+    async def refund(self, account_key: str) -> int:
+        """Gives back a unit counted for a fetch that never reached LinkedIn.
+
+        The quota exists to cap *account exposure*, and exposure is measured
+        in requests actually sent. A call that was counted and then failed
+        before issuing a single upstream request spent no exposure, so
+        charging for it just shrinks the day's real budget. Anything that did
+        reach LinkedIn is not refunded, however it ended - a 404 or a rejected
+        session still put traffic on the account.
+        """
+        return self._remaining(await self._backend.decrement(account_key))

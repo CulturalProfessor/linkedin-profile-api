@@ -15,9 +15,28 @@ any of them individually.
 from __future__ import annotations
 
 import abc
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 
 import httpx
+
+
+def utc_today() -> date:
+    """The quota day, in UTC.
+
+    Deliberately not `date.today()`: that is the *host's* local date, so the
+    counter rolled over at whatever midnight the deployment happened to sit
+    in, while the X-RateLimit-Reset header advertises the next UTC midnight.
+    One of the two had to move, and UTC is the one that stays true when the
+    service is redeployed to a different region.
+    """
+    return datetime.now(timezone.utc).date()
+
+
+def next_utc_midnight() -> int:
+    """Unix timestamp of the instant the quota day rolls over - the value
+    X-RateLimit-Reset carries."""
+    tomorrow = datetime.now(timezone.utc).date() + timedelta(days=1)
+    return int(datetime(tomorrow.year, tomorrow.month, tomorrow.day, tzinfo=timezone.utc).timestamp())
 
 
 class QuotaBackend(abc.ABC):
@@ -30,6 +49,11 @@ class QuotaBackend(abc.ABC):
     async def current(self, account_key: str) -> int:
         """Today's count for this account, without incrementing it."""
 
+    @abc.abstractmethod
+    async def decrement(self, account_key: str) -> int:
+        """Gives one unit back, for a fetch that was counted but never
+        actually reached LinkedIn. Never goes below zero."""
+
 
 class InMemoryQuotaBackend(QuotaBackend):
     """Process-local fallback for local dev without a shared store configured.
@@ -41,20 +65,23 @@ class InMemoryQuotaBackend(QuotaBackend):
     def __init__(self) -> None:
         self._counts: dict[str, tuple[date, int]] = {}
 
-    def _bump(self, account_key: str) -> int:
-        today = date.today()
+    def _bump(self, account_key: str, delta: int) -> int:
+        today = utc_today()
         day, count = self._counts.get(account_key, (today, 0))
         if day != today:
             count = 0
-        count += 1
+        count = max(0, count + delta)
         self._counts[account_key] = (today, count)
         return count
 
     async def increment_and_check(self, account_key: str) -> int:
-        return self._bump(account_key)
+        return self._bump(account_key, 1)
+
+    async def decrement(self, account_key: str) -> int:
+        return self._bump(account_key, -1)
 
     async def current(self, account_key: str) -> int:
-        today = date.today()
+        today = utc_today()
         day, count = self._counts.get(account_key, (today, 0))
         return count if day == today else 0
 
@@ -77,7 +104,7 @@ class UpstashQuotaBackend(QuotaBackend):
         )
 
     def _key(self, account_key: str) -> str:
-        return f"{self._KEY_PREFIX}{account_key}:{date.today().isoformat()}"
+        return f"{self._KEY_PREFIX}{account_key}:{utc_today().isoformat()}"
 
     async def increment_and_check(self, account_key: str) -> int:
         key = self._key(account_key)
@@ -85,6 +112,19 @@ class UpstashQuotaBackend(QuotaBackend):
         resp.raise_for_status()
         results = resp.json()
         return int(results[0]["result"])
+
+    async def decrement(self, account_key: str) -> int:
+        # DECR on a key INCR just created cannot underflow in practice, but a
+        # refund arriving after the day rolled over would otherwise leave the
+        # new day's counter at -1 and hand out a free extra fetch.
+        key = self._key(account_key)
+        resp = await self._client.post("/pipeline", json=[["DECR", key], ["EXPIRE", key, self._TTL_SECONDS]])
+        resp.raise_for_status()
+        value = int(resp.json()[0]["result"])
+        if value < 0:
+            await self._client.post("/pipeline", json=[["SET", key, "0"]])
+            return 0
+        return value
 
     async def current(self, account_key: str) -> int:
         resp = await self._client.get(f"/get/{self._key(account_key)}")

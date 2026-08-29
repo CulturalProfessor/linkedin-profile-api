@@ -65,8 +65,38 @@ class Profile(BaseModel):
     images: ProfileImages = ProfileImages()
 
 
-class ProfileResponse(BaseModel):
+class Meta(BaseModel):
+    """Everything about *this call* that isn't profile data.
+
+    Exists so a caller can answer, from the response alone: where did this
+    come from, how old is it, what did it cost, and how much budget is left.
+    All of it was knowable server-side before and simply wasn't exposed -
+    which also made every latency change unmeasurable from the outside.
+    """
+
     source: str  # "live" | "cache"
     fetched_at: str
+    request_id: str
+    duration_ms: int
+    # 0 on a cache hit; on a live fetch, the number of Voyager requests
+    # actually issued - one resolve plus one per section. Note this is
+    # normally ~7x the number of /profile calls the daily quota counts.
+    upstream_requests: int = 0
+    # None on a live fetch (the data is new), otherwise how long the cached
+    # copy has been sitting on disk.
+    cache_age_seconds: int | None = None
+    # None when the quota store couldn't be consulted, which is deliberately
+    # not an error - an Upstash hiccup must not fail a good response.
+    quota_remaining: int | None = None
+
+
+class ProfileResponse(BaseModel):
+    # `source` and `fetched_at` are duplicated from `meta` on purpose: they
+    # were top-level before `meta` existed, and removing them in the same
+    # release that adds it would break every existing consumer for no reason.
+    # Deprecated - read them from `meta`.
+    source: str  # "live" | "cache"
+    fetched_at: str
+    meta: Meta
     profile: Profile
     limitations: list[str] = []

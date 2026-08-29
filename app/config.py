@@ -188,6 +188,14 @@ class Settings:
     # default_factory because dataclasses reject a mutable default.
     browser_headers: dict = field(default_factory=_browser_headers)
 
+    # Shared secret required on /profile when the request would spend the
+    # *backend* session. Unset means no key is required - fine locally, but a
+    # deployment that carries a backend cookie and no key is an open proxy for
+    # that LinkedIn account: anyone who finds the URL can scrape through it on
+    # your identity and burn your daily quota. app.main warns loudly at startup
+    # when that combination is configured.
+    api_key: str | None = _raw("API_KEY")
+
     # Kill switch. When false, the API never touches LinkedIn and serves only
     # cached profiles. Flip this if anything looks wrong in production.
     allow_live: bool = _bool("ALLOW_LIVE", True)
@@ -209,6 +217,13 @@ class Settings:
     # Falls back to a process-local in-memory counter when unset.
     upstash_redis_rest_url: str | None = _raw("UPSTASH_REDIS_REST_URL")
     upstash_redis_rest_token: str | None = _raw("UPSTASH_REDIS_REST_TOKEN")
+
+    def requires_api_key(self) -> bool:
+        """Only meaningful when there is a backend session to protect. With no
+        backend session configured every caller brings their own cookie and
+        spends their own account's risk budget, so there is nothing for a key
+        to guard."""
+        return bool(self.api_key and self.has_backend_session())
 
     def has_backend_session(self) -> bool:
         return bool(self.full_cookie or (self.li_at and self.jsessionid))

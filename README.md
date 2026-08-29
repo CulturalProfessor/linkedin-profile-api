@@ -360,9 +360,27 @@ documented primary path rather than a fallback.
 | `x-li-cookie` (header) | no* | **Recommended.** The whole `Cookie` header from a real linkedin.com request |
 | `x-li-at` (header) | no* | Minimal alternative: just the `li_at` cookie |
 | `x-jsessionid` (header) | no* | Paired with `x-li-at` |
+| `x-api-key` (header) | no** | Required to spend the *backend* session on a deployment that sets `API_KEY` |
 
 \* required unless a backend demo session is configured. `x-li-cookie` wins
 when both forms are supplied.
+
+\** **The submitted deployment runs with `API_KEY` unset, so `/profile` is open
+- the brief asks for a public API and a reviewer should be able to curl the URL
+with no header and get a profile back.** The key exists because that openness
+is a deliberate choice rather than an oversight: a deployment carrying a
+backend cookie with no key is an open proxy for that LinkedIn account, and
+anyone who finds the URL can scrape through it on your identity until the
+daily quota runs out. Here the quota (150/day, per account) is what caps the
+exposure; `API_KEY` is the switch to close it entirely, and is what a
+non-demo deployment of this service would set. The key is only
+demanded from callers who *don't* bring a session of their own - if you send
+your own `x-li-cookie` you're spending your own account's risk budget, so
+there's nothing for the key to protect. `/health` stays open either way, so
+the service still looks alive to a monitor. A malformed `x-li-cookie` does not
+count as bringing your own session: it falls through to the backend cookie, so
+the key is still required. The app logs a startup warning when a backend
+session is configured with no key set.
 
 ```bash
 curl -s 'https://<your-deployment>/profile?url=https://www.linkedin.com/in/satyanadella' | jq
@@ -372,13 +390,67 @@ A live fetch takes roughly 10-15s: seven upstream Voyager requests with a
 jittered pause between each (see the guardrails above). Cache hits return
 immediately and are marked `"source": "cache"`.
 
-Responses: `200` with the profile JSON, `401` (no usable session / session
-rejected by LinkedIn), `404` (profile not found), `429` (daily quota
-exhausted), `503` (kill switch engaged).
+Responses: `200` with the profile JSON, `400` (unparseable URL), `401` (no
+usable session / bad `x-api-key` / session rejected by LinkedIn), `404`
+(profile not found), `429` (daily quota exhausted, **or LinkedIn rate-limiting
+the session** - both carry `Retry-After`), `503` (kill switch engaged).
+
+Upstream `429` is reported as `429`, not as a generic `502`. It's the one
+status where the caller's correct move is to back off rather than retry or
+re-auth, and it's the earliest warning that the account is under pressure -
+so it also aborts the remaining fan-out and is logged loudly rather than
+being swallowed as "this section is missing".
+
+The kill switch outranks session resolution: with `ALLOW_LIVE=false` and no
+session supplied you get the `503`, not a `401`. The `401` would be true but
+misleading - no cookie would have helped.
+
+#### Response headers
+
+Every response carries `X-Request-ID` (the same id in the logs and in
+`meta.request_id`). Any response that can identify an account also carries:
+
+```
+X-RateLimit-Limit:     150
+X-RateLimit-Remaining: 147
+X-RateLimit-Reset:     1788134400   # unix ts, next UTC midnight
+Retry-After:           3600         # 429 only
+```
+
+The quota day is keyed on the **UTC** date, so `X-RateLimit-Reset` is true
+regardless of which region the service is deployed in.
+
+#### The `meta` block
+
+```jsonc
+"meta": {
+  "source": "live",                 // live | cache
+  "fetched_at": "2026-08-30T…",
+  "request_id": "01j2f4a9c1b7",
+  "duration_ms": 9480,
+  "upstream_requests": 7,           // 0 on a cache hit
+  "cache_age_seconds": null,        // null on a live fetch
+  "quota_remaining": 147            // null if the quota store was unreachable
+}
+```
+
+`source` and `fetched_at` are still duplicated at the top level for existing
+consumers, and are deprecated in favour of `meta`. `quota_remaining` is
+best-effort: a blip reading the shared Upstash counter reports `null` rather
+than failing a response that is otherwise perfectly good.
+
+Note `upstream_requests` against the quota: the daily quota counts `/profile`
+calls, so real traffic on the account is up to **7×** the number the counter
+shows. A fetch that fails *after* reaching LinkedIn is not refunded - the
+requests were made and the exposure was spent. A fetch that fails before
+issuing any upstream request is refunded.
 
 ### `GET /health`
 
-Liveness + remaining daily quota, no auth required.
+Liveness, deployment posture (`allow_live`, `api_key_required`,
+`shared_quota_store`, `daily_quota`, `quota_resets_at`) and the backend
+session's remaining daily quota. No auth required, deliberately - a monitor
+must be able to tell the service is up without holding the API key.
 
 ## Limitations
 
