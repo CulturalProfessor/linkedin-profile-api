@@ -666,6 +666,38 @@ continent reads as anomalous on top of the datacenter IP itself. Expect a
 deployed backend session to be less durable than a local one, which is why
 `x-li-cookie` is the documented primary path rather than a fallback.
 
+### Keeping the instance warm
+
+Render's free tier stops the container after ~15 minutes without traffic, and
+the next request pays a ~30s cold start. That is by far the worst latency in
+the system and the first thing anyone hitting the URL experiences, so point a
+free scheduler at `/health` every 10 minutes:
+
+```
+https://<your-deployment>/health    every 10 minutes
+```
+
+[cron-job.org](https://cron-job.org) or any uptime monitor does this without an
+account on the service itself. `/health` makes no LinkedIn request, so the ping
+costs nothing against the daily quota; it reads the quota counter from Upstash,
+which at six pings an hour is negligible against that free tier too.
+
+Worth being precise about what this does and does not buy, because it is easy
+to over-claim. It removes the cold start, and it lets calls arriving within ten
+minutes of each other share one upstream connection instead of one per fresh
+container. It does **not** keep the connection to LinkedIn alive across longer
+gaps: `keepalive_expiry` is 600s and `/health` never touches LinkedIn, so a
+fetch after a quiet half hour still opens a new TLS connection either way. The
+only way to avoid that would be pinging LinkedIn itself every few minutes,
+which trades ~144 requests a day of real account exposure for a handful of
+handshakes. That is a bad deal, and LinkedIn would likely drop the idle socket
+regardless.
+
+So: a latency fix, and a real one, but not a way to make a replayed session
+last longer. What actually preserves a session is capturing it fresh, deploying
+once, and then leaving the deployment alone, since every deploy, cold start and
+local server run is another new connection.
+
 ### Docker
 
 ```bash
