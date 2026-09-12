@@ -40,9 +40,29 @@ FIELD_SECTIONS: dict[str, tuple[str, ...]] = {
     "skills": ("profileSkills",),
     "certifications": ("profileCertifications",),
     "languages": ("profileLanguages",),
+
+    # Costs a request, but not a *section* one - see FOLLOWER_COUNT below.
+    "follower_count": (),
 }
 
+# Opt-in: valid in an explicit `?fields=` list, absent from the default set.
+#
+# Every other field here is either free off the resolve or pays for a section
+# in the existing fan-out, so folding them all into one "everything" default
+# costs nothing extra. follower_count is different: it is a separate upstream
+# request to a separate resource (feed/dash/followingStates - see
+# app/voyager_client.py). Putting it in the default would make every existing
+# caller pay for a field they never asked for, and would change the default
+# response shape for all of them. So "all fields" and "the default" stop being
+# the same set here, and the default is the one that stayed still.
+OPT_IN = frozenset({"follower_count"})
+
+# Everything that exists - the validation set.
 ALL_FIELDS = frozenset(FIELD_SECTIONS)
+
+# What a caller who says nothing gets. Byte-identical to what ALL_FIELDS
+# returned before follower_count existed.
+DEFAULT_FIELDS = ALL_FIELDS - OPT_IN
 
 # Always returned, whatever was asked for: both come off the resolve call at
 # no extra cost, and a response that can't be tied back to a person is not
@@ -55,15 +75,17 @@ class UnknownField(ValueError):
 
 
 def parse(raw: str | None) -> frozenset[str]:
-    """`None` or an empty value means every field - narrowing is opt-in, so an
-    existing caller who has never heard of this parameter keeps getting exactly
-    what they got before."""
+    """`None` or an empty value means every *default* field - narrowing is
+    opt-in, so an existing caller who has never heard of this parameter keeps
+    getting exactly what they got before. Note this is DEFAULT_FIELDS, not
+    ALL_FIELDS: an opt-in field has to be named explicitly, which is the whole
+    point of it being opt-in."""
     if raw is None or not raw.strip():
-        return frozenset(ALL_FIELDS)
+        return frozenset(DEFAULT_FIELDS)
 
     requested = {part.strip().lower() for part in raw.split(",") if part.strip()}
     if not requested:
-        return frozenset(ALL_FIELDS)
+        return frozenset(DEFAULT_FIELDS)
 
     unknown = sorted(requested - ALL_FIELDS)
     if unknown:
@@ -83,3 +105,15 @@ def sections_for(fields: frozenset[str], ordered: tuple[str, ...]) -> tuple[str,
     """
     needed = {section for field in fields for section in FIELD_SECTIONS.get(field, ())}
     return tuple(section for section in ordered if section in needed)
+
+
+def needs_following_state(fields: frozenset[str]) -> bool:
+    """Whether this request has to fetch the FollowingState entity.
+
+    Kept out of `sections_for` deliberately: that function's contract is the
+    dash section fan-out, whose order encodes which sections survive
+    throttling. FollowingState is a different resource with a different URL
+    shape and no place in that ordering, so pretending it is a section would
+    make `sections_for` lie about what it returns.
+    """
+    return "follower_count" in fields

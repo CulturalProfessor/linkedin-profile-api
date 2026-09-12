@@ -196,3 +196,84 @@ async def test_resolve_returning_no_urns_is_also_404():
         with pytest.raises(VoyagerError) as exc:
             await client.fetch_profile("nobody-here")
     assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_following_state_is_not_fetched_unless_asked():
+    """The whole point of the field being opt-in: a caller who doesn't want a
+    follower count must not pay a request for one."""
+    paths = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path.endswith("/dash/profiles"):
+            return httpx.Response(200, json=_resolve_body())
+        return httpx.Response(200, json=_empty_section())
+
+    async with _client(handler) as client:
+        await client.fetch_profile("someone", FETCHED_SECTIONS)
+
+    assert not any("followingStates" in path for path in paths)
+    assert client.upstream_requests == 1 + len(FETCHED_SECTIONS)
+
+
+@pytest.mark.asyncio
+async def test_following_state_costs_exactly_one_extra_request():
+    paths = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path.endswith("/dash/profiles"):
+            return httpx.Response(200, json=_resolve_body())
+        return httpx.Response(200, json={"data": {"followerCount": 42}, "included": []})
+
+    async with _client(handler) as client:
+        raw = await client.fetch_profile("someone", (), include_following_state=True)
+
+    # Resolve + following state, and no sections.
+    assert client.upstream_requests == 2
+    assert raw["followingState"]["data"]["followerCount"] == 42
+    # The urn goes in the path with its colons intact - percent-encoding them
+    # is what an httpx `params=` would do, and restli rejects that.
+    assert paths[-1] == f"/voyager/api/feed/dash/followingStates/urn:li:fsd_followingState:{URN}"
+
+
+@pytest.mark.asyncio
+async def test_missing_following_state_is_not_fatal():
+    """No follower count is a limitation, not a failed fetch - the rest of the
+    profile is still perfectly good."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/dash/profiles"):
+            return httpx.Response(200, json=_resolve_body())
+        if "followingStates" in request.url.path:
+            return httpx.Response(404, text="")
+        return httpx.Response(200, json=_empty_section())
+
+    async with _client(handler) as client:
+        raw = await client.fetch_profile("someone", FETCHED_SECTIONS, include_following_state=True)
+
+    assert "followingState" not in raw
+    assert "profile" in raw
+
+
+@pytest.mark.asyncio
+async def test_throttled_following_state_aborts_the_fan_out():
+    """429 on the follower count means the session is under pressure, and
+    firing six more sections into that is how throttling becomes revocation."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/dash/profiles"):
+            return httpx.Response(200, json=_resolve_body())
+        if "followingStates" in request.url.path:
+            return httpx.Response(429, text="", headers={"retry-after": "30"})
+        return httpx.Response(200, json=_empty_section())
+
+    async with _client(handler) as client:
+        with pytest.raises(VoyagerError) as exc:
+            await client.fetch_profile("someone", FETCHED_SECTIONS, include_following_state=True)
+
+    assert exc.value.status_code == 429
+    assert exc.value.retry_after == 30
+    # Aborted before any section went out: resolve + the throttled call only.
+    assert client.upstream_requests == 2

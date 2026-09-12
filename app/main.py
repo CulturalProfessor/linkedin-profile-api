@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 from app import fields as field_spec
 from app.cache import DiskCache, UpstashCache
 from app.config import get_settings
-from app.denormalize import denormalize
+from app.denormalize import FOLLOWER_COUNT_WITHHELD, denormalize, follower_count
 from app.models import Meta, ProfileResponse
 from app.quota import InMemoryQuotaBackend, UpstashQuotaBackend
 from app.rate_limit import QuotaExceeded, RateLimiter
@@ -113,6 +113,18 @@ _STALE_UPSTREAM_FAILED = (
     "this response is from an expired cache entry: the live fetch failed "
     "({reason}), so stale data was returned instead of an error. See "
     "meta.cache_age_seconds for how old this copy is."
+)
+
+# follower_count is the one field a cache entry can be missing rather than
+# merely null, because it is opt-in: an entry written before this field
+# existed, or by a request that didn't ask for it, never fetched it. That is a
+# different statement from "LinkedIn withheld it", and the two must not be
+# conflated - so a top-up is attempted, and when it can't run the caller is
+# told why rather than handed a null that looks like a hidden count.
+_FOLLOWER_NOT_TOPPED_UP = (
+    "follower_count is null because this cached copy predates the field, and "
+    "it could not be fetched now ({reason}). This is not the same as LinkedIn "
+    "withholding it. Retry, or use force_refresh=true, to populate it."
 )
 
 
@@ -236,7 +248,21 @@ def _stale_response(
     recorded, so a caller reading only that list still learns the data is old.
     """
     value = dict(entry.value)
-    value["limitations"] = [*value.get("limitations", []), note]
+    notes = [note]
+    # No top-up on this path: the entry is expired and a full refresh is
+    # already the answer, so spending a request to fill one field into a copy
+    # that is about to be replaced would be wasted. But the caller asked for
+    # the field, so the null has to be explained rather than just handed over.
+    if (
+        field_spec.needs_following_state(wanted)
+        and "follower_count" not in (value.get("profile") or {})
+    ):
+        notes.append(
+            _FOLLOWER_NOT_TOPPED_UP.format(
+                reason="this cached copy is expired and is being replaced wholesale"
+            )
+        )
+    value["limitations"] = [*value.get("limitations", []), *notes]
     return _render(
         ProfileResponse(
             **value,
@@ -273,21 +299,60 @@ def _render(payload: ProfileResponse, wanted: frozenset[str], response: Response
     return JSONResponse(data, headers=dict(response.headers))
 
 
-async def _fan_out(session: tuple[str, str, str], public_id: str, sections: tuple[str, ...]):
+def _client(session: tuple[str, str, str]) -> VoyagerClient:
+    _, cookie_header, csrf_token = session
+    return VoyagerClient(
+        cookie_header,
+        csrf_token,
+        http_client=app.state.http,
+        min_delay=settings.min_delay,
+        max_delay=settings.max_delay,
+        browser_headers=settings.browser_headers,
+    )
+
+
+async def _fan_out(
+    session: tuple[str, str, str],
+    public_id: str,
+    sections: tuple[str, ...],
+    include_following_state: bool = False,
+):
     """One paced Voyager fan-out. Returns (raw, upstream_requests); raises
     VoyagerError. Held under _fan_out_lock so two of these never interleave."""
-    _, cookie_header, csrf_token = session
     async with _fan_out_lock:
-        async with VoyagerClient(
-            cookie_header,
-            csrf_token,
-            http_client=app.state.http,
-            min_delay=settings.min_delay,
-            max_delay=settings.max_delay,
-            browser_headers=settings.browser_headers,
-        ) as client:
+        async with _client(session) as client:
             try:
-                return await client.fetch_profile(public_id, sections), client.upstream_requests
+                return (
+                    await client.fetch_profile(
+                        public_id, sections, include_following_state=include_following_state
+                    ),
+                    client.upstream_requests,
+                )
+            except VoyagerError as exc:
+                exc.upstream_requests = client.upstream_requests
+                raise
+
+
+async def _fetch_follower_count(
+    session: tuple[str, str, str], public_id: str, profile_urn: str | None
+) -> tuple[int | None, int]:
+    """Just the follower count, for topping up a cache entry that lacks it.
+
+    One request when the entry cached the profile urn, two when it didn't -
+    entries written before this change have no urn to key the FollowingState
+    lookup on, so the resolve has to be paid again. Returns
+    (count, upstream_requests).
+    """
+    async with _fan_out_lock:
+        async with _client(session) as client:
+            try:
+                if profile_urn:
+                    body = await client.fetch_following_state(profile_urn)
+                    return follower_count({"followingState": body}), client.upstream_requests
+                # No cached urn: resolve, but fetch no sections - we already
+                # hold every one of them.
+                raw = await client.fetch_profile(public_id, (), include_following_state=True)
+                return follower_count(raw), client.upstream_requests
             except VoyagerError as exc:
                 exc.upstream_requests = client.upstream_requests
                 raise
@@ -313,10 +378,16 @@ async def _refresh_in_background(public_id: str, session: tuple[str, str, str]) 
 
         raw, upstream_requests = await _fan_out(session, public_id, FETCHED_SECTIONS)
         profile, limitations = denormalize(public_id, raw)
+        # Default fields only, so follower_count was never fetched - stored
+        # absent rather than null, the same as the foreground path, so a later
+        # request for it tops up instead of reading a null as "withheld".
+        refreshed = profile.model_dump()
+        refreshed.pop("follower_count", None)
         await cache.set(public_id, {
             "fetched_at": datetime.now(UTC).isoformat(),
-            "profile": profile.model_dump(),
+            "profile": refreshed,
             "limitations": limitations,
+            "urn": raw.get("urn"),
         })
         logger.info(
             "background refresh of %s ok, upstream_requests=%d", public_id, upstream_requests
@@ -325,6 +396,66 @@ async def _refresh_in_background(public_id: str, session: tuple[str, str, str]) 
         logger.warning("background refresh of %s failed, keeping stale entry: %s", public_id, exc)
     finally:
         _refreshing.discard(public_id)
+
+
+async def _top_up_follower_count(
+    entry,
+    public_id: str,
+    wanted: frozenset[str],
+    session: tuple[str, str, str] | None,
+    account_key: str | None,
+) -> tuple[dict, int, list[str]]:
+    """Fills follower_count into a cache entry that never fetched it.
+
+    Returns (value, upstream_requests, extra_limitations). The key being
+    *absent* is what marks "never fetched" - a fetch that ran and came back
+    empty stores an explicit null, so a member who hides their count is not
+    re-fetched on every single cache hit.
+
+    The rewrite deliberately carries the entry's original `cached_at`
+    forward. Only the follower count is new; the profile beside it is exactly
+    as old as it was, and resetting the clock would hide that from
+    meta.cache_age_seconds and postpone the next real refresh.
+    """
+    value = entry.value
+    if not field_spec.needs_following_state(wanted):
+        return value, 0, []
+    if "follower_count" in (value.get("profile") or {}):
+        return value, 0, []
+
+    if session is None or not settings.allow_live:
+        reason = "live fetches are disabled" if session else "no session available"
+        return value, 0, [_FOLLOWER_NOT_TOPPED_UP.format(reason=reason)]
+
+    assert account_key is not None
+    try:
+        await rate_limiter.before_live_fetch(account_key)
+    except QuotaExceeded:
+        return value, 0, [_FOLLOWER_NOT_TOPPED_UP.format(reason="the daily quota is spent")]
+
+    try:
+        count, used = await _fetch_follower_count(session, public_id, value.get("urn"))
+    except VoyagerError as exc:
+        used = getattr(exc, "upstream_requests", 0)
+        if used == 0:
+            await rate_limiter.refund(account_key)
+        logger.warning("follower count top-up for %s failed: %s", public_id, exc)
+        return value, used, [
+            _FOLLOWER_NOT_TOPPED_UP.format(reason=f"upstream status {exc.status_code}")
+        ]
+
+    merged = {**value, "profile": {**(value.get("profile") or {}), "follower_count": count}}
+    # A withheld count is a property of the member, not of this request, so the
+    # note is persisted with the entry rather than attached to this response
+    # only - otherwise the next cache hit would serve the same null silently.
+    if count is None:
+        merged["limitations"] = [*merged.get("limitations", []), FOLLOWER_COUNT_WITHHELD]
+    await cache.set(public_id, merged, cached_at=entry.cached_at)
+    logger.info(
+        "follower count topped up for %s (count=%s, upstream_requests=%d)",
+        public_id, count, used,
+    )
+    return merged, used, []
 
 
 def _start_refresh(public_id: str, session: tuple[str, str, str] | None) -> bool:
@@ -375,7 +506,9 @@ async def get_profile(
             "each, and sections are fetched one at a time with a pause between, "
             "so `?fields=name,headline` costs one upstream request (~0.5s) against "
             "seven (~9.5s) for the full set. public_identifier and name are always "
-            "included - they are free. Valid: "
+            "included - they are free. follower_count is opt-in and absent unless "
+            "named explicitly: it is the one field that costs a request of its own, "
+            "so it is not in the default set. Valid: "
             + ", ".join(sorted(field_spec.ALL_FIELDS))
         ),
     ),
@@ -463,26 +596,33 @@ async def get_profile(
                 response,
             )
         if entry is not None:
+            # A cached entry covers every *default* field (see the write
+            # below), so it serves any subset of those for free. follower_count
+            # is the exception: opt-in, so an entry may never have fetched it,
+            # and this is the one case where a cache hit can still cost a
+            # request.
+            value, topped_up, extra = await _top_up_follower_count(
+                entry, public_id, wanted, session, account_key
+            )
+            if extra:
+                value = {**value, "limitations": [*value.get("limitations", []), *extra]}
             remaining = await _quota_remaining(account_key)
             _set_quota_headers(response, remaining)
             logger.info(
                 "request_id=%s public_id=%s outcome=ok source=cache duration_ms=%d "
-                "upstream_requests=0 cache_age_s=%d quota_remaining=%s",
-                request_id, public_id, elapsed_ms(), entry.age_seconds, remaining,
+                "upstream_requests=%d cache_age_s=%d quota_remaining=%s",
+                request_id, public_id, elapsed_ms(), topped_up, entry.age_seconds, remaining,
             )
-            # A cached entry is always complete (see the write below), so it
-            # can serve any field subset - `?fields=name` off a warm cache
-            # costs nothing at all.
             return _render(
                 ProfileResponse(
-                    **entry.value,
+                    **value,
                     source="cache",
                     meta=Meta(
                         source="cache",
-                        fetched_at=entry.value["fetched_at"],
+                        fetched_at=value["fetched_at"],
                         request_id=request_id,
                         duration_ms=elapsed_ms(),
-                        upstream_requests=0,
+                        upstream_requests=topped_up,
                         cache_age_seconds=entry.age_seconds,
                         quota_remaining=remaining,
                         fields=sorted(wanted),
@@ -530,7 +670,9 @@ async def get_profile(
 
     upstream_requests = 0
     try:
-        raw, upstream_requests = await _fan_out(session, public_id, sections)
+        raw, upstream_requests = await _fan_out(
+            session, public_id, sections, field_spec.needs_following_state(wanted)
+        )
     except VoyagerError as exc:
         upstream_requests = getattr(exc, "upstream_requests", 0)
         status = exc.status_code
@@ -622,8 +764,22 @@ async def get_profile(
     # storing it would let `?fields=name` poison the entry that a later full
     # request reads - the caller would get a 200 carrying empty experience and
     # education, indistinguishable from a member who has neither.
-    if wanted == field_spec.ALL_FIELDS:
-        await cache.set(public_id, {**payload, "profile": profile.model_dump()})
+    #
+    # "Complete" means every default field, not every field: follower_count is
+    # opt-in, so requiring it here would stop caching the ordinary request.
+    if wanted >= field_spec.DEFAULT_FIELDS:
+        cached_profile = profile.model_dump()
+        if not field_spec.needs_following_state(wanted):
+            # Absent, not null. A null would claim LinkedIn withheld the count
+            # when in fact nobody asked for it, and that lie is what the
+            # top-up path keys off to decide whether to fetch it.
+            cached_profile.pop("follower_count", None)
+        await cache.set(
+            public_id,
+            # The urn makes a later top-up one request instead of two, by
+            # saving it the resolve.
+            {**payload, "profile": cached_profile, "urn": raw.get("urn")},
+        )
 
     _set_quota_headers(response, remaining)
     logger.info(

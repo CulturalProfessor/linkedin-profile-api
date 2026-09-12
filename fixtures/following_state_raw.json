@@ -1,0 +1,57 @@
+{
+  "_note": "Real feed/dash/followingStates responses, captured live. This is the only source of follower_count: the legacy identity/profiles/{id}/networkinfo endpoint that published write-ups point at now answers 410 Gone, and the dash profiles resolve carries no following data at all (verified against a profile with showFollowerCount:true and eight figures of followers - its `included` bag holds the Profile entity and nothing else). Note the shape: a single entity bare on `data`, with `included` empty, unlike every collection section in this repo.",
+
+  "self": {
+    "_note": "The session's own profile. followeeCount is populated here and null for third parties, which is what establishes that LinkedIn nulls individual fields in place rather than failing the request.",
+    "status": 200,
+    "body": {
+      "data": {
+        "followeeCount": 4187,
+        "entityUrn": "urn:li:fsd_followingState:urn:li:fsd_profile:ACoAADhtj3gBkivsFX5H61vU6iIdtHGjhptZtQQ",
+        "following": false,
+        "preDashFollowingInfoUrn": "urn:li:fs_followingInfo:urn:li:member:ACoAADhtj3gBkivsFX5H61vU6iIdtHGjhptZtQQ",
+        "trackingUrn": null,
+        "followingType": null,
+        "followerCount": 3682,
+        "$type": "com.linkedin.voyager.dash.feed.FollowingState"
+      },
+      "included": []
+    }
+  },
+
+  "third_party": {
+    "_note": "A public creator profile (showFollowerCount:true) fetched with someone else's session. Proves the count is readable for members other than the session owner.",
+    "status": 200,
+    "body": {
+      "data": {
+        "followeeCount": null,
+        "entityUrn": "urn:li:fsd_followingState:urn:li:fsd_profile:ACoAAAEkwwAB9KEc2TrQgOLEQ-vzRyZeCDyc6DQ",
+        "following": true,
+        "preDashFollowingInfoUrn": "urn:li:fs_followingInfo:urn:li:member:ACoAAAEkwwAB9KEc2TrQgOLEQ-vzRyZeCDyc6DQ",
+        "trackingUrn": null,
+        "followingType": null,
+        "followerCount": 12161980,
+        "$type": "com.linkedin.voyager.dash.feed.FollowingState"
+      },
+      "included": []
+    }
+  },
+
+  "withheld": {
+    "_note": "SYNTHETIC, not captured. Models a member who hides their follower count (showFollowerCount:false seen from a third-party session) by nulling followerCount the way the real response nulls followeeCount above. Here so the withheld branch is covered; replace it with a real capture if one is ever observed.",
+    "status": 200,
+    "body": {
+      "data": {
+        "followeeCount": null,
+        "entityUrn": "urn:li:fsd_followingState:urn:li:fsd_profile:ACoAAFakeHiddenCountSynthetic003",
+        "following": false,
+        "preDashFollowingInfoUrn": "urn:li:fs_followingInfo:urn:li:member:ACoAAFakeHiddenCountSynthetic003",
+        "trackingUrn": null,
+        "followingType": null,
+        "followerCount": null,
+        "$type": "com.linkedin.voyager.dash.feed.FollowingState"
+      },
+      "included": []
+    }
+  }
+}

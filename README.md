@@ -3,10 +3,10 @@
 [![CI](https://github.com/CulturalProfessor/linkedin-profile-api/actions/workflows/ci.yml/badge.svg)](https://github.com/CulturalProfessor/linkedin-profile-api/actions/workflows/ci.yml)
 
 A LinkedIn profile URL goes in, structured JSON comes out: name, headline,
-location, about, experience, education, skills, certifications, languages and
-images. It is purely reverse engineered, calling LinkedIn's own internal
-Voyager endpoints directly. There is no browser automation here, and no
-HTML or JSON-LD scraping.
+location, about, experience, education, skills, certifications, languages,
+images and, on request, follower count. It is purely reverse engineered,
+calling LinkedIn's own internal Voyager endpoints directly. There is no
+browser automation here, and no HTML or JSON-LD scraping.
 
 ## Try it
 
@@ -233,7 +233,8 @@ curl -s 'https://<your-deployment>/profile?url=<url>&fields=name,headline' | jq
 | `location` | 2 | ~1.5s |
 | `education` / `skills` / `certifications` / `languages` (each) | 2 | ~1.5s |
 | `experience` | 3 | ~2.5s |
-| omitted (all fields) | 7 | ~9.5s |
+| `follower_count` | 2 | ~1.5s |
+| omitted (the default set) | 7 | ~9.5s |
 
 Some details worth knowing:
 
@@ -244,6 +245,13 @@ Some details worth knowing:
   means "you didn't ask for this"; `"skills": []` means "this member has no
   skills". Returning `[]` for both would make a narrow query look like a very
   sparse profile. `meta.fields` lists what the response actually carries.
+- **`follower_count` is opt-in and absent unless you name it.** It is the one
+  field that costs an upstream request of its own rather than riding along on
+  a section, so putting it in the default set would make every existing caller
+  pay for it. `?fields=` without it behaves exactly as it did before the field
+  existed. It is nullable, and `null` means LinkedIn did not return a count -
+  members can hide it - never that the member has no followers. A `limitations`
+  note says which case you got.
 - **`location` costs a section**, which is not obvious - it pulls
   `profilePositions`. The readable city string appears nowhere in the resolve
   response; the denormalizer recovers it by matching the profile's `geoUrn`

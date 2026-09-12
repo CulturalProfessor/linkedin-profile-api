@@ -82,8 +82,18 @@ def _decode(raw: str | None, key: str) -> tuple[dict, float] | None:
     return value, float(cached_at)
 
 
-def _encode(value: dict) -> str:
-    return json.dumps({"v": SCHEMA_VERSION, "cached_at": time.time(), "value": value})
+def _encode(value: dict, cached_at: float | None = None) -> str:
+    """`cached_at` is overridable so an entry can be rewritten without
+    pretending it is new. Used when a field is topped up into an existing
+    entry: the follower count is fresh, but the profile data it sits beside is
+    exactly as old as it was, and resetting the clock would hide that."""
+    return json.dumps(
+        {
+            "v": SCHEMA_VERSION,
+            "cached_at": time.time() if cached_at is None else cached_at,
+            "value": value,
+        }
+    )
 
 
 class CacheBackend(abc.ABC):
@@ -108,10 +118,13 @@ class CacheBackend(abc.ABC):
         serve-stale-on-failure paths in app/main.py)."""
 
     @abc.abstractmethod
-    async def set(self, key: str, value: dict) -> None:
+    async def set(self, key: str, value: dict, *, cached_at: float | None = None) -> None:
         """Never raises. A cache that cannot be written is a performance
         problem, not a correctness one - the response the caller is waiting on
-        is already computed."""
+        is already computed.
+
+        `cached_at` preserves an existing entry's age across a rewrite - see
+        `_encode`."""
 
     async def get(self, key: str) -> dict | None:
         entry = await self.get_entry(key)
@@ -149,7 +162,7 @@ class DiskCache(CacheBackend):
             return None
         return CacheEntry(value=value, cached_at=cached_at)
 
-    async def set(self, key: str, value: dict) -> None:
+    async def set(self, key: str, value: dict, *, cached_at: float | None = None) -> None:
         """Write to a sibling temp file, then os.replace() it into position.
         replace() is atomic on POSIX, so a reader either sees the whole old
         entry or the whole new one - never the truncated middle of a write
@@ -159,7 +172,7 @@ class DiskCache(CacheBackend):
         tmp_fd, tmp_name = tempfile.mkstemp(dir=self._dir, prefix=f".{key}.", suffix=".tmp")
         try:
             with os.fdopen(tmp_fd, "w") as handle:
-                handle.write(_encode(value))
+                handle.write(_encode(value, cached_at))
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(tmp_name, path)
@@ -251,13 +264,14 @@ class UpstashCache(CacheBackend):
             return None
         return CacheEntry(value=value, cached_at=cached_at)
 
-    async def set(self, key: str, value: dict) -> None:
+    async def set(self, key: str, value: dict, *, cached_at: float | None = None) -> None:
         # SET is atomic server-side, so there is no equivalent of the disk
         # backend's temp-file dance: a reader sees either the old value or the
         # new one, never a partial write.
         try:
             await self._command(
-                ["SET", self._key(key), _encode(value), "EX", self._RETENTION_SECONDS]
+                ["SET", self._key(key), _encode(value, cached_at),
+                 "EX", self._RETENTION_SECONDS]
             )
         except Exception as exc:  # noqa: BLE001 - see CacheBackend.set
             logger.warning(

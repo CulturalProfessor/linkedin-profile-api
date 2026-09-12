@@ -381,5 +381,21 @@
       },
       "included": []
     }
+  },
+  "followingState": {
+    "status": 200,
+    "body": {
+      "data": {
+        "followeeCount": 312,
+        "entityUrn": "urn:li:fsd_followingState:urn:li:fsd_profile:ACoAAFakeJamieLinSynthetic001",
+        "following": false,
+        "preDashFollowingInfoUrn": "urn:li:fs_followingInfo:urn:li:member:ACoAAFakeJamieLinSynthetic001",
+        "trackingUrn": null,
+        "followingType": null,
+        "followerCount": 1842,
+        "$type": "com.linkedin.voyager.dash.feed.FollowingState"
+      },
+      "included": []
+    }
   }
 }

@@ -55,6 +55,13 @@ class Profile(BaseModel):
     public_identifier: str
     name: str
     headline: str | None = None
+    # Nullable, and None means "not available" rather than zero. LinkedIn
+    # withholds this per member (the profile entity's `showFollowerCount`
+    # flag) and returns null in place rather than failing the request, so a
+    # zero here would assert something false about a real person. Absent from
+    # the default response entirely - it is opt-in, because unlike every other
+    # field it costs an upstream request of its own. See app/fields.py.
+    follower_count: int | None = None
     location: str | None = None
     about: str | None = None
     experience: list[ExperienceEntry] = []

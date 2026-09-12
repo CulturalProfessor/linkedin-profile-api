@@ -40,6 +40,9 @@ def _voyager_handler(*, resolve_status=200, section_status=200, retry_after=None
         if section_status != 200:
             headers = {"retry-after": str(retry_after)} if retry_after else {}
             return httpx.Response(section_status, text="nope", headers=headers)
+        if "followingStates" in request.url.path:
+            # Not a collection like the sections: one entity bare on `data`.
+            return httpx.Response(200, json=FIXTURE["followingState"]["body"])
         # Fixture entries are {"status": ..., "body": ...}; the body is what
         # the real endpoint returns.
         section = request.url.path.rsplit("/", 1)[-1]
@@ -490,3 +493,174 @@ def test_stale_response_can_still_be_narrowed(api, tmp_path):
     body = _get(api, fields="name").json()
     assert body["meta"]["source"] == "stale"
     assert "experience" not in body["profile"]
+
+
+# --- follower_count -------------------------------------------------------
+#
+# Opt-in, because unlike every other field it costs an upstream request of its
+# own (feed/dash/followingStates - the legacy networkinfo endpoint that used to
+# carry it now answers 410 Gone). So the tests that matter most are the ones
+# asserting that a caller who says nothing is completely unaffected.
+
+FOLLOWERS = FIXTURE["followingState"]["body"]["data"]["followerCount"]
+
+
+def test_default_response_is_unchanged_by_follower_count(api):
+    """No key, no limitation, no extra request. A caller who has never heard
+    of this field gets byte-identical output to before it existed."""
+    calls = []
+    api.transport(_voyager_handler(calls=calls))
+    body = _get(api).json()
+
+    assert "follower_count" not in body["profile"]
+    assert "follower_count" not in body["meta"]["fields"]
+    assert body["meta"]["upstream_requests"] == 7  # resolve + six sections
+    assert not any("follower_count" in note for note in body["limitations"])
+    assert not any("followingStates" in url for url in calls)
+
+
+def test_follower_count_when_asked_for(api):
+    calls = []
+    api.transport(_voyager_handler(calls=calls))
+    body = _get(api, fields="name,follower_count").json()
+
+    assert body["profile"]["follower_count"] == FOLLOWERS
+    # Resolve + the following state, and not one section: follower_count maps
+    # to no section at all.
+    assert body["meta"]["upstream_requests"] == 2
+    assert sum("followingStates" in url for url in calls) == 1
+
+
+def test_narrow_request_for_follower_count_is_not_cached(api):
+    """Same rule as any narrowed fetch: it is missing sections, so storing it
+    would poison the entry a later full request reads."""
+    _get(api, fields="follower_count")
+    assert _get(api).json()["meta"]["source"] == "live"
+
+
+def test_full_request_with_follower_count_is_cached(api):
+    first = _get(api, fields=",".join(sorted(main.field_spec.ALL_FIELDS)))
+    assert first.json()["meta"]["source"] == "live"
+
+    second = _get(api, fields="follower_count")
+    assert second.json()["meta"]["source"] == "cache"
+    assert second.json()["profile"]["follower_count"] == FOLLOWERS
+    assert second.json()["meta"]["upstream_requests"] == 0
+
+
+def _legacy_entry(**overrides):
+    """A cache entry as written before follower_count existed: no such key on
+    the profile, and no urn stored alongside it."""
+    value = {
+        "fetched_at": "2026-01-01T00:00:00+00:00",
+        "profile": {"public_identifier": "jamie-lin-synthetic", "name": "Jamie Lin",
+                    "headline": "Engineer", "experience": [], "education": [],
+                    "skills": [], "certifications": [], "languages": [],
+                    "images": {"profile_picture": None, "background_picture": None}},
+        "limitations": [],
+    }
+    value.update(overrides)
+    return value
+
+
+def test_entry_written_before_this_change_still_serves(api):
+    """The requirement that matters most for a live deployment: yesterday's
+    cache must keep serving, not force a re-fetch of every profile."""
+    main.cache._path("jamie-lin-synthetic").write_text(
+        json.dumps({"v": 2, "cached_at": time.time(), "value": _legacy_entry()})
+    )
+    body = _get(api).json()
+
+    assert body["meta"]["source"] == "cache"
+    assert body["meta"]["upstream_requests"] == 0
+    assert body["profile"]["name"] == "Jamie Lin"
+
+
+def test_legacy_entry_is_topped_up_when_follower_count_is_asked_for(api):
+    """The key is absent, which means nobody ever fetched it - distinct from
+    present-and-null, which means LinkedIn withheld it."""
+    cached_at = time.time() - 60
+    main.cache._path("jamie-lin-synthetic").write_text(
+        json.dumps({"v": 2, "cached_at": cached_at, "value": _legacy_entry()})
+    )
+    calls = []
+    api.transport(_voyager_handler(calls=calls))
+    body = _get(api, fields="name,follower_count").json()
+
+    assert body["profile"]["follower_count"] == FOLLOWERS
+    assert body["meta"]["source"] == "cache"
+    # No cached urn on a legacy entry, so the resolve has to be paid again.
+    assert body["meta"]["upstream_requests"] == 2
+    assert sum("followingStates" in url for url in calls) == 1
+
+
+def test_top_up_uses_the_cached_urn_and_keeps_the_entry_s_age(api):
+    """One request, not two - and the rewrite must not reset cache_age_seconds,
+    or 23-hour-old experience data would start looking freshly fetched."""
+    cached_at = time.time() - 3600
+    main.cache._path("jamie-lin-synthetic").write_text(
+        json.dumps({"v": 2, "cached_at": cached_at,
+                    "value": _legacy_entry(urn=URN)})
+    )
+    body = _get(api, fields="name,follower_count").json()
+
+    assert body["meta"]["upstream_requests"] == 1
+    assert body["meta"]["cache_age_seconds"] >= 3600
+
+    # Persisted, so the next caller pays nothing.
+    again = _get(api, fields="name,follower_count").json()
+    assert again["meta"]["upstream_requests"] == 0
+    assert again["profile"]["follower_count"] == FOLLOWERS
+    assert again["meta"]["cache_age_seconds"] >= 3600
+
+
+def test_top_up_that_cannot_run_says_so(api):
+    """A null with no explanation would read as "LinkedIn withheld it", which
+    is a claim about the member rather than about this deployment."""
+    main.cache._path("jamie-lin-synthetic").write_text(
+        json.dumps({"v": 2, "cached_at": time.time(), "value": _legacy_entry(urn=URN)})
+    )
+    api.set(allow_live=False)
+    body = _get(api, fields="name,follower_count").json()
+
+    assert body["profile"]["follower_count"] is None
+    assert body["meta"]["upstream_requests"] == 0
+    assert any("predates the field" in note for note in body["limitations"])
+
+
+def test_withheld_count_is_not_refetched_on_every_hit(api):
+    """Present-and-null is an answer. Re-fetching it on each cache hit would
+    spend a request per call for a member who simply hides the number."""
+    def handler(request: httpx.Request) -> httpx.Response:
+        if "followingStates" in request.url.path:
+            return httpx.Response(200, json={"data": {"followerCount": None}, "included": []})
+        return _voyager_handler()(request)
+
+    api.transport(handler)
+    first = _get(api, fields=",".join(sorted(main.field_spec.ALL_FIELDS))).json()
+    assert first["profile"]["follower_count"] is None
+    assert any("showFollowerCount" in note for note in first["limitations"])
+
+    second = _get(api, fields="follower_count").json()
+    assert second["meta"]["upstream_requests"] == 0
+    assert second["profile"]["follower_count"] is None
+
+
+def test_unknown_field_still_rejected(api):
+    assert _get(api, fields="followers").status_code == 400
+
+
+def test_stale_entry_explains_a_missing_follower_count(api):
+    """No top-up on the stale path - the whole entry is being replaced - but a
+    null the caller asked for still has to be explained."""
+    main.cache._path("jamie-lin-synthetic").write_text(
+        json.dumps({"v": 2, "cached_at": time.time() - 25 * 3600,
+                    "value": _legacy_entry(urn=URN)})
+    )
+    body = _get(api, fields="name,follower_count").json()
+    _drain()
+
+    assert body["meta"]["source"] == "stale"
+    assert body["profile"]["follower_count"] is None
+    assert body["meta"]["upstream_requests"] == 0
+    assert any("predates the field" in note for note in body["limitations"])

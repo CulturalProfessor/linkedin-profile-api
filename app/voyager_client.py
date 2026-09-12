@@ -29,6 +29,22 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://www.linkedin.com"
 PROFILE_RESOLVE_PATH = "/voyager/api/identity/dash/profiles"
 
+# Follower count. Not a dash *section*: a single-entity GET on a separate
+# resource, keyed by a following-state urn that wraps the profile urn.
+#
+# Two dead ends preceded this, both worth recording so nobody spends the
+# requests again. The legacy REST endpoint
+# `identity/profiles/{publicIdentifier}/networkinfo` - which returned
+# followersCount and the connection degree together, and is what most
+# published write-ups still point at - now answers 410 Gone. And the dash
+# resolve we already make carries no following data at all: confirmed against
+# a profile with `showFollowerCount: true` and eight figures of followers, the
+# `included` bag holds the Profile entity and nothing else.
+#
+# This path is lifted verbatim from LinkedIn's own follow-toggle code, which
+# POSTs to it to follow and unfollow. A plain GET reads it.
+FOLLOWING_STATE_PATH = "/voyager/api/feed/dash/followingStates/urn:li:fsd_followingState:{profile_urn}"
+
 # Section name -> Voyager dash resource path. Names match the fixture keys
 # 1:1 so denormalize.py can consume {section_name: body} directly.
 SECTION_PATHS = {
@@ -289,8 +305,21 @@ class VoyagerClient:
         path = SECTION_PATHS[section]
         return await self._get(path, {"q": "viewee", "profileUrn": profile_urn})
 
+    async def fetch_following_state(self, profile_urn: str) -> dict:
+        """The FollowingState entity for one profile, carrying followerCount.
+
+        The urn goes in the *path*, not a query parameter, and its colons must
+        survive unencoded - which they do only because nothing re-encodes the
+        path here. Passing this URL through httpx's `params=` would percent-
+        encode them, and an empty params dict drops a query string entirely.
+        """
+        return await self._get(FOLLOWING_STATE_PATH.format(profile_urn=profile_urn), {})
+
     async def fetch_profile(
-        self, public_identifier: str, sections: tuple[str, ...] = FETCHED_SECTIONS
+        self,
+        public_identifier: str,
+        sections: tuple[str, ...] = FETCHED_SECTIONS,
+        include_following_state: bool = False,
     ) -> dict:
         """Returns {"urn": ..., "profile": <body>, <section>: <body>, ...} -
         the same shape as fixtures/sample_raw.json's per-section "body" values.
@@ -299,6 +328,10 @@ class VoyagerClient:
         `?fields=` cheap: the resolve call below is unavoidable, but each
         section skipped is one fewer paced upstream request against the
         session. Pass a subset of FETCHED_SECTIONS, in its order.
+
+        `include_following_state` adds one request for the follower count,
+        under the "followingState" key. Off by default, so a caller who does
+        not ask for that field pays nothing for it.
         """
         try:
             profile_body = await self._get(
@@ -328,6 +361,23 @@ class VoyagerClient:
             )
         urn = urns[0]
         raw: dict = {"urn": urn, "profile": profile_body}
+
+        # Before the section fan-out, not after: this is the field a creator
+        # card leads with, and whatever runs last is what dies when throttling
+        # starts mid-sequence. Same reasoning as FETCHED_SECTIONS' ordering.
+        if include_following_state:
+            try:
+                raw["followingState"] = await self.fetch_following_state(urn)
+            except VoyagerError as exc:
+                if exc.status_code in _FAN_OUT_FATAL:
+                    raise
+                # Anything else means no follower count for this member, which
+                # the denormalizer reports as a limitation. Not fatal: the rest
+                # of the profile is still perfectly good.
+                logger.warning(
+                    "following state unavailable for %s: %s", public_identifier, exc
+                )
+
         for section in sections:
             try:
                 raw[section] = await self.fetch_section(section, urn)

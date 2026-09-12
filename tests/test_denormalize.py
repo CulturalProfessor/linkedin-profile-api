@@ -238,3 +238,49 @@ def test_null_names_do_not_crash_and_are_reported():
     assert unnamed.school_urn == "urn:li:fsd_school:18315"
     assert profile.certifications[0].name is None
     assert any("no school name" in note for note in limitations)
+
+
+def _following_state(variant: str) -> dict:
+    """One capture out of fixtures/following_state_raw.json, shaped the way
+    the client stores it: {"followingState": <body>}."""
+    fixture = json.loads((FIXTURES_DIR / "following_state_raw.json").read_text())
+    return {"followingState": fixture[variant]["body"]}
+
+
+def test_follower_count_from_real_response():
+    """The real third-party capture: a public creator's count, read off the
+    entity sitting bare on `data` rather than out of `included`."""
+    raw = {**_load("sample_raw.json"), **_following_state("third_party")}
+    profile, limitations = denormalize("satyanadella", raw, frozenset({"follower_count"}))
+
+    assert profile.follower_count == 12161980
+    assert not any("follower_count" in note for note in limitations)
+
+
+def test_follower_count_from_the_sessions_own_profile():
+    raw = _following_state("self")
+    raw["profile"] = _load("sample_raw.json")["profile"]
+    profile, _ = denormalize("vinayakshxyz", raw, frozenset({"follower_count"}))
+
+    assert profile.follower_count == 3682
+
+
+def test_withheld_follower_count_is_null_and_reported():
+    """A hidden count comes back null in place, not as an error. Returning 0
+    would assert this member has no followers, which is a different claim."""
+    raw = {**_load("sample_raw.json"), **_following_state("withheld")}
+    profile, limitations = denormalize("hidden", raw, frozenset({"follower_count"}))
+
+    assert profile.follower_count is None
+    assert any("showFollowerCount" in note for note in limitations)
+
+
+def test_follower_count_absent_when_not_requested():
+    """The section was never fetched, so there is nothing to report - and
+    saying "LinkedIn withheld it" to someone who never asked would be a lie."""
+    raw = _load("sample_raw.json")
+    raw.pop("followingState", None)
+    profile, limitations = denormalize("jamie-lin-dev", raw)
+
+    assert profile.follower_count is None
+    assert not any("follower_count" in note for note in limitations)

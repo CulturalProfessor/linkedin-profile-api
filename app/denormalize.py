@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.fields import ALL_FIELDS
+from app.fields import DEFAULT_FIELDS
 from app.models import (
     CertificationEntry,
     EducationEntry,
@@ -22,6 +22,18 @@ from app.models import (
 )
 
 Json = dict[str, Any]
+
+# Shared with app/main.py, which reaches the same conclusion by a different
+# route when it tops a follower count into an existing cache entry. One
+# wording, so a caller cannot tell the two paths apart - they mean the same
+# thing about the member.
+FOLLOWER_COUNT_WITHHELD = (
+    "follower_count is null - LinkedIn did not return a follower count "
+    "for this member. Members can hide it (the profile entity's "
+    "showFollowerCount flag), and a hidden count comes back as null "
+    "rather than an error. Reported as null rather than 0, which would "
+    "assert this member has no followers."
+)
 
 
 def _index_by_urn(section: Json) -> tuple[list[Json], dict[str, Json]]:
@@ -100,6 +112,32 @@ def _geo_names(raw: dict[str, Json]) -> dict[str, str]:
         if geo_urn and name:
             names.setdefault(geo_urn, name)
     return names
+
+
+def follower_count(raw: dict[str, Json]) -> int | None:
+    """Follower count off the FollowingState entity.
+
+    The odd one out in this module: every other section is a collection, so
+    it is parsed by indexing `included` and walking `*elements`. This response
+    is a single entity sitting bare on `data`, with `included` empty, so
+    `_index_by_urn` would find nothing. Confirmed against two live responses.
+
+    None means "not available", never zero. LinkedIn withholds the count per
+    member - the profile entity carries a `showFollowerCount` flag - and when
+    it does, the key comes back null in place rather than the request failing.
+    A sibling field on the same entity (`followeeCount`) is null for third
+    parties while `followerCount` is populated, so a null here is a genuine
+    per-field withholding and not a sign the fetch went wrong.
+
+    Public, unlike its siblings: app/main.py's cache top-up path needs to
+    read this one field out of a lone FollowingState response, without a whole
+    profile to denormalize alongside it.
+    """
+    section = raw.get("followingState")
+    if not section:
+        return None
+    value = (section.get("data") or {}).get("followerCount")
+    return value if isinstance(value, int) else None
 
 
 def _experience(raw: dict[str, Json]) -> list[ExperienceEntry]:
@@ -260,12 +298,14 @@ def denormalize(
     """raw maps section name (e.g. "profile", "profileEducations") to that
     section's `{"data": ..., "included": ...}` body - i.e. one fixture entry.
 
-    `fields` is the set the caller asked for (None means all). It gates the
+    `fields` is the set the caller asked for (None means the default set,
+    not every field - an opt-in field nobody asked for was never fetched, so
+    reporting it as withheld would be wrong). It gates the
     `limitations` notes: a section that wasn't requested is absent by choice,
     not degraded, and reporting "experience entries have no job title" to
     someone who only asked for skills would be actively misleading.
     """
-    wanted = fields if fields is not None else ALL_FIELDS
+    wanted = fields if fields is not None else DEFAULT_FIELDS
     limitations: list[str] = []
 
     profile_entity = _extract_profile_entity(raw.get("profile", {}))
@@ -304,10 +344,15 @@ def denormalize(
             "are populated."
         )
 
+    followers = follower_count(raw)
+    if "follower_count" in wanted and followers is None:
+        limitations.append(FOLLOWER_COUNT_WITHHELD)
+
     profile = Profile(
         public_identifier=public_identifier,
         name=name,
         headline=profile_entity.get("headline"),
+        follower_count=followers,
         location=location,
         about=profile_entity.get("summary"),
         experience=_experience(raw),
